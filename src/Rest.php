@@ -16,6 +16,21 @@ class Rest implements Module
     public function register(): void
     {
         add_action('rest_api_init', [self::class, 'routes']);
+        add_filter('rest_post_dispatch', [self::class, 'noCache'], 10, 3);
+    }
+
+    /**
+     * Answers depend on the session cookie, so no page or edge cache may keep
+     * them (Kinsta caches REST GETs when the site sends public headers).
+     */
+    public static function noCache($response, $server, WP_REST_Request $request)
+    {
+        if (str_starts_with($request->get_route(), '/'.self::NAMESPACE) && $response instanceof \WP_REST_Response) {
+            $response->header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0, private');
+            $response->header('Vary', 'Cookie');
+        }
+
+        return $response;
     }
 
     public static function routes(): void

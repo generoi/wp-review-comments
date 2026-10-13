@@ -38,7 +38,9 @@
   async function api(path, options = {}) {
     const headers = { 'Content-Type': 'application/json' };
     if (C.nonce) headers['X-WP-Nonce'] = C.nonce;
-    const response = await fetch(C.rest + path, { credentials: 'same-origin', ...options, headers });
+    // A unique query keeps edge caches (Kinsta, Cloudflare) out of GETs.
+    if (!options.method || options.method === 'GET') path += (path.includes('?') ? '&' : '?') + '_=' + Date.now();
+    const response = await fetch(C.rest + path, { credentials: 'same-origin', cache: 'no-store', ...options, headers });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.message || 'Request failed (' + response.status + ')');
     return data;
