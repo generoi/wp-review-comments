@@ -1,0 +1,168 @@
+<?php
+
+namespace GeneroWP\ReviewComments;
+
+use WP_Error;
+use WP_REST_Request;
+use WP_REST_Server;
+
+/**
+ * REST API used by the frontend overlay.
+ */
+class Rest implements Module
+{
+    public const NAMESPACE = 'wprc/v1';
+
+    public function register(): void
+    {
+        add_action('rest_api_init', [self::class, 'routes']);
+    }
+
+    public static function routes(): void
+    {
+        register_rest_route(self::NAMESPACE, '/session', [
+            [
+                'methods' => WP_REST_Server::CREATABLE,
+                'callback' => [self::class, 'startSession'],
+                'permission_callback' => '__return_true',
+                'args' => ['token' => ['type' => 'string', 'required' => true]],
+            ],
+            [
+                'methods' => WP_REST_Server::DELETABLE,
+                'callback' => function () {
+                    Session::end();
+
+                    return ['ok' => true];
+                },
+                'permission_callback' => '__return_true',
+            ],
+        ]);
+
+        register_rest_route(self::NAMESPACE, '/me', [
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => [self::class, 'me'],
+            'permission_callback' => '__return_true',
+        ]);
+
+        register_rest_route(self::NAMESPACE, '/comments', [
+            [
+                'methods' => WP_REST_Server::READABLE,
+                'callback' => [self::class, 'listComments'],
+                'permission_callback' => [Session::class, 'canComment'],
+                'args' => ['url' => ['type' => 'string', 'required' => true]],
+            ],
+            [
+                'methods' => WP_REST_Server::CREATABLE,
+                'callback' => [self::class, 'createComment'],
+                'permission_callback' => [Session::class, 'canComment'],
+            ],
+        ]);
+
+        register_rest_route(self::NAMESPACE, '/comments/(?P<id>\d+)/status', [
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => [self::class, 'setStatus'],
+            'permission_callback' => [Session::class, 'isEditor'],
+            'args' => ['status' => ['type' => 'string', 'enum' => Store::STATUSES, 'required' => true]],
+        ]);
+    }
+
+    public static function startSession(WP_REST_Request $request): array|WP_Error
+    {
+        if ($limited = self::rateLimit('session', 20)) {
+            return $limited;
+        }
+        $round = Session::start((string) $request['token']);
+        if (is_wp_error($round)) {
+            return $round;
+        }
+
+        return ['ok' => true, 'round' => get_the_title($round)];
+    }
+
+    public static function me(): array
+    {
+        $user = wp_get_current_user();
+        $round = Session::currentRound();
+
+        return [
+            'can_comment' => Session::canComment(),
+            'is_editor' => Session::isEditor(),
+            'name' => $user->exists() ? $user->display_name : null,
+            'round' => $round ? get_the_title($round) : null,
+        ];
+    }
+
+    public static function listComments(WP_REST_Request $request): array
+    {
+        $editor = Session::isEditor();
+
+        return array_map(
+            fn ($post) => Store::formatThread($post, $editor),
+            Store::queryThreads(['url' => (string) $request['url']])
+        );
+    }
+
+    public static function createComment(WP_REST_Request $request): array|WP_Error
+    {
+        if ($limited = self::rateLimit('comment', 60)) {
+            return $limited;
+        }
+        $data = (array) $request->get_json_params();
+        $user = wp_get_current_user();
+        if ($user->exists()) {
+            $data['author_name'] = $user->display_name;
+            $data['author_email'] = $user->user_email;
+            $data['author_type'] = 'user';
+        } else {
+            $data['author_name'] = trim((string) ($data['author_name'] ?? ''));
+            if ($data['author_name'] === '') {
+                return new WP_Error('wprc_name_required', __('Please enter your name.', 'wp-review-comments'), ['status' => 400]);
+            }
+            $data['author_type'] = 'guest';
+        }
+        $data['round'] = Session::currentRound() ?? 0;
+        $data['user_agent'] = $request->get_header('user_agent');
+        if (isset($data['url'])) {
+            $data['url'] = Store::normalizeUrl((string) $data['url']);
+        }
+        unset($data['status']);
+
+        $id = Store::createComment($data);
+        if (is_wp_error($id)) {
+            return $id;
+        }
+        $post = get_post($id);
+        $root = $post->post_parent ? get_post($post->post_parent) : $post;
+
+        return Store::formatThread($root, Session::isEditor());
+    }
+
+    public static function setStatus(WP_REST_Request $request): array|WP_Error
+    {
+        $result = Store::setStatus((int) $request['id'], (string) $request['status']);
+        if (is_wp_error($result)) {
+            return $result;
+        }
+
+        return Store::formatThread(get_post((int) $request['id']), true);
+    }
+
+    /**
+     * Simple per-IP limit: $max requests per action every 10 minutes.
+     */
+    private static function rateLimit(string $action, int $max): ?WP_Error
+    {
+        if (Session::isEditor()) {
+            return null;
+        }
+        $ip = $_SERVER['REMOTE_ADDR'] ?? '';
+        $key = 'wprc_rl_'.$action.'_'.md5($ip);
+        $count = (int) get_transient($key);
+        if ($count >= $max) {
+            return new WP_Error('wprc_rate_limited', __('Too many requests, try again in a few minutes.', 'wp-review-comments'), ['status' => 429]);
+        }
+        set_transient($key, $count + 1, 10 * MINUTE_IN_SECONDS);
+
+        return null;
+    }
+}

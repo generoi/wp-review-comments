@@ -1,0 +1,7 @@
+/vendor/
+/node_modules/
+.phpunit.result.cache
+/tests/e2e/.auth/
+/test-results/
+/playwright-report/
+/tests/wp-tests-config.php
