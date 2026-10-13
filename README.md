@@ -5,7 +5,7 @@ Click-to-comment website review for WordPress. Clients and the team pin comments
 - **Comment on anything.** Click "+ Comment", click an element, write. Pins stay on the element and follow it on scroll and resize.
 - **Several people at once.** Every comment has a named author; threads take replies; the page refreshes comments every 20 seconds.
 - **Guests without accounts.** Share a review link; people enter their name on their first comment.
-- **Built for Claude.** Each thread stores the page path, post ID, block chain (`wp-block-button < wp-block-gds-hero`), nearest heading, CSS selector, text snippet and viewport, so Claude can go from a comment straight to the block or template that needs changing.
+- **Built for Claude.** Each thread stores the page path, post ID, block chain (`wp-block-button / wp-block-gds-hero`, innermost first), nearest heading, CSS selector, text snippet and viewport, so Claude can go from a comment straight to the block or template that needs changing.
 
 ## Install
 

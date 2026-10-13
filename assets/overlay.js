@@ -125,7 +125,7 @@
       const match = typeof node.className === 'string' && node.className.match(/(?:^|\s)(wp-block-[a-z0-9-]+)/);
       if (match && !chain.includes(match[1])) chain.push(match[1]);
     }
-    return chain.join(' < ');
+    return chain.join(' / ');
   }
 
   function postId() {
@@ -512,6 +512,7 @@
     else if (token) togglePanel(true);
 
     setInterval(() => { if (document.visibilityState === 'visible' && !state.composer) load().catch(() => {}); }, POLL_MS);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !state.composer) load().catch(() => {}); });
     // Late layout shifts (fonts, images, sliders) move elements after load.
     window.addEventListener('load', () => { elementCache.clear(); positionPins(); });
   }
