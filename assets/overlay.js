@@ -333,15 +333,20 @@
     setCommenting(false);
     placeHighlight(el);
 
-    const needsName = !state.me.name;
+    // Guests type their name once; after that it is remembered in this browser.
+    const askName = !state.me.name && !store.get('name');
+    const nameFields = h('div', { class: 'row', hidden: !askName },
+      h('input', { name: 'author_name', required: askName, placeholder: 'Your name', value: store.get('name'), autocomplete: 'off', 'data-1p-ignore': '', 'data-lpignore': 'true', 'data-form-type': 'other' }),
+      h('input', { name: 'author_email', type: 'email', placeholder: 'Email (optional)', value: store.get('email'), autocomplete: 'off', 'data-1p-ignore': '', 'data-lpignore': 'true', 'data-form-type': 'other' }),
+    );
+    const asWho = !state.me.name && !askName ? h('p', { class: 'as' }, 'Commenting as ' + store.get('name') + ' · ',
+      h('button', { type: 'button', class: 'link', onclick: (e) => { nameFields.hidden = false; nameFields.querySelector('input').required = true; e.target.parentNode.remove(); } }, 'change')) : null;
     composerEl.replaceChildren(h('form', { onsubmit: (e) => { e.preventDefault(); submitComposer(e.target); } },
       h('p', { class: 'target' }, 'On: “' + state.composer.snippet.slice(0, 70) + '”'),
       h('textarea', { name: 'text', rows: 4, required: true, placeholder: 'What should change here?',
         onkeydown: (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) e.target.form.requestSubmit(); } }),
-      needsName ? h('div', { class: 'row' },
-        h('input', { name: 'author_name', required: true, placeholder: 'Your name', value: store.get('name') }),
-        h('input', { name: 'author_email', type: 'email', placeholder: 'Email (optional)', value: store.get('email') }),
-      ) : null,
+      state.me.name ? null : nameFields,
+      asWho,
       h('div', { class: 'actions' },
         h('button', { type: 'button', onclick: closeComposer }, 'Cancel'),
         h('button', { type: 'submit', class: 'primary' }, 'Post comment'),
@@ -558,6 +563,8 @@
       .composer { position: fixed; background: #fff; color: #18181b; padding: 12px; border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); font-size: 14px; }
       .composer form { display: grid; gap: 8px; }
       .target { margin: 0; font-size: 12px; color: #71717a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .as { margin: 0; font-size: 12px; color: #71717a; }
+      .link { border: 0; background: none; padding: 0; color: #4f46e5; font-size: 12px; text-decoration: underline; }
       .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
       .actions { display: flex; justify-content: flex-end; gap: 6px; }
       .toast { position: fixed; left: 50%; bottom: 72px; transform: translateX(-50%); background: #18181b; color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 14px; max-width: calc(100vw - 32px); }
