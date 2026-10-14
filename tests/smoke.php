@@ -36,6 +36,13 @@ $capture = function ($pre, $args, $url) use (&$sent) {
     return $pre;
 };
 add_filter('pre_http_request', $capture, 10, 3);
+$mails = [];
+$captureMail = function ($pre, $atts) use (&$mails) {
+    $mails[] = $atts;
+
+    return true;
+};
+add_filter('pre_wp_mail', $captureMail, 10, 2);
 $editorId = get_current_user_id();
 
 try {
@@ -47,12 +54,13 @@ try {
     $check('round is active', Session::isRoundActive($round['id']));
 
     WP_CLI::log('Guest comment');
-    Notifications::saveSettings('https://chat.googleapis.com/v1/spaces/SMOKE/messages?key=k&token=t', false);
+    Notifications::saveSettings('https://chat.googleapis.com/v1/spaces/SMOKE/messages?key=k&token=t', true);
     wp_set_current_user(0);
     $_COOKIE[Session::GUEST_COOKIE] = str_repeat('a', 32);
     $id = Store::createComment([
         'text' => 'Smoke test comment',
         'author_name' => 'Smoke Guest',
+        'author_email' => 'smoke-guest@example.test',
         'author_type' => 'guest',
         'guest_key' => Session::guestKey(),
         'url' => '/smoke-test/?utm_source=x&nocache=1',
@@ -95,6 +103,30 @@ try {
     $reply = Store::createComment(['parent' => $id, 'text' => 'Smoke reply', 'author_type' => 'user']);
     $created[] = $reply;
     $check('reply created and notified', is_int($reply) && count($sent) === 2);
+    $check('new thread sends no email', count($mails) === 1);
+    $check('reply emails the other participant', ($mails[0]['to'] ?? '') === 'smoke-guest@example.test', (string) ($mails[0]['to'] ?? 'none'));
+    $check('email links the thread', str_contains((string) ($mails[0]['message'] ?? ''), '#wprc-'.$id));
+
+    WP_CLI::log('REST as the editor (what the status dropdown calls)');
+    $request = new WP_REST_Request('POST', '/wprc/v1/comments/'.$id.'/status');
+    $request->set_param('status', 'wontfix');
+    $response = rest_do_request($request);
+    $check('editor sets status over REST', $response->get_status() === 200 && ($response->get_data()['status'] ?? '') === 'wontfix', (string) $response->get_status());
+    $bad = new WP_REST_Request('POST', '/wprc/v1/comments/'.$id.'/status');
+    $bad->set_param('status', 'nope');
+    $check('REST rejects unknown status', rest_do_request($bad)->get_status() === 400);
+    $boot = new WP_REST_Request('GET', '/wprc/v1/boot');
+    $boot->set_param('url', '/smoke-test/?utm_source=x');
+    $bootData = rest_do_request($boot)->get_data();
+    $check('boot returns script, editor and threads', str_contains($bootData['script'] ?? '', 'overlay.js') && ($bootData['me']['is_editor'] ?? false) && count($bootData['threads'] ?? []) === 1);
+    $headers = rest_do_request($boot);
+    $headers = apply_filters('rest_post_dispatch', $headers, rest_get_server(), $boot)->get_headers();
+    $check('REST answers are no-store', str_contains($headers['Cache-Control'] ?? '', 'no-store'));
+    wp_set_current_user(0);
+    $guest = new WP_REST_Request('POST', '/wprc/v1/comments/'.$id.'/status');
+    $guest->set_param('status', 'open');
+    $check('guest cannot set status over REST', in_array(rest_do_request($guest)->get_status(), [401, 403], true));
+    wp_set_current_user($editorId);
     $check('editor may moderate', Store::canModify(get_post($id)) === current_user_can('edit_others_posts'));
 
     wp_set_current_user(0);
@@ -135,6 +167,7 @@ try {
     }
 } finally {
     remove_filter('pre_http_request', $capture, 10);
+    remove_filter('pre_wp_mail', $captureMail, 10);
     wp_set_current_user($editorId);
     foreach (array_reverse($created) as $postId) {
         if (is_int($postId) && get_post($postId)) {
