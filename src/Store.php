@@ -56,6 +56,17 @@ class Store implements Module
     {
         add_action('init', [self::class, 'registerPostTypes']);
         add_action('init', [self::class, 'migrate'], 20);
+        add_action('before_delete_post', [self::class, 'beforeDelete']);
+    }
+
+    /**
+     * Emptying the trash removes the screenshot file too.
+     */
+    public static function beforeDelete(int $id): void
+    {
+        if (get_post_type($id) === self::COMMENT) {
+            self::deleteScreenshot($id);
+        }
     }
 
     /**
@@ -185,8 +196,9 @@ class Store implements Module
     }
 
     /**
-     * Delete a comment. A thread that others have replied to keeps its
-     * replies and only loses its own text.
+     * Delete a comment by moving it to the trash, where an admin can restore
+     * it. A thread that others have replied to stays visible with its replies
+     * and only loses its own text, which is kept in a revision-like meta.
      */
     public static function deleteComment(int $id): true|WP_Error
     {
@@ -195,15 +207,14 @@ class Store implements Module
             return new WP_Error('wprc_not_found', __('Comment not found.', 'wp-review-comments'), ['status' => 404]);
         }
         if (! $post->post_parent && self::replies($id)) {
+            update_post_meta($id, '_wprc_deleted_text', $post->post_content);
             wp_update_post(['ID' => $id, 'post_content' => '', 'post_title' => __('(deleted)', 'wp-review-comments')]);
             update_post_meta($id, '_wprc_deleted', time());
 
             return true;
         }
-        self::deleteScreenshot($id);
-        wp_delete_post($id, true);
 
-        return true;
+        return wp_trash_post($id) ? true : new WP_Error('wprc_delete_failed', __('Could not delete the comment.', 'wp-review-comments'), ['status' => 500]);
     }
 
     public static function setStatus(int $id, string $status): true|WP_Error

@@ -102,7 +102,9 @@ try {
     $check('and marked deleted', Store::formatThread($kept)['deleted'] === true && $kept->post_content === '');
     wp_set_current_user($editorId);
     Store::deleteComment($reply);
-    $check('reply hard-deleted', get_post($reply) === null);
+    $check('reply moved to trash', get_post_status($reply) === 'trash');
+    $check('trashed reply not listed', Store::replies($id) === []);
+    $check('deleted thread text kept for restoring', get_post_meta($id, '_wprc_deleted_text', true) === 'Smoke test comment, edited');
 
     WP_CLI::log('Status');
     $check('status change', Store::setStatus($id, 'in_progress') === true);
