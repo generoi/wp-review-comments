@@ -164,7 +164,9 @@ class Rest implements Module
      */
     public static function listAllThreads(): array
     {
-        return array_map(fn (WP_Post $post) => [
+        $threads = array_filter(Store::queryThreads(['limit' => 500]), fn (WP_Post $post) => ! get_post_meta($post->ID, '_wprc_deleted', true));
+
+        return array_values(array_map(fn (WP_Post $post) => [
             'id' => $post->ID,
             'url' => (string) get_post_meta($post->ID, '_wprc_url', true) ?: '/',
             'page_title' => (string) get_post_meta($post->ID, '_wprc_page_title', true),
@@ -173,7 +175,7 @@ class Rest implements Module
             'created' => get_post_time('c', true, $post),
             'author' => Store::formatComment($post)['author'],
             'text' => wp_trim_words($post->post_content, 16, '…'),
-        ], Store::queryThreads(['limit' => 500]));
+        ], $threads));
     }
 
     public static function listComments(WP_REST_Request $request): array
