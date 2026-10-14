@@ -155,6 +155,8 @@ class Rest implements Module
             'is_editor' => Session::isEditor(),
             'name' => $user->exists() ? $user->display_name : null,
             'round' => $round ? get_the_title($round) : null,
+            // Only ask guests for an email address when it is used for something.
+            'asks_email' => Notifications::settings()['email_participants'],
         ];
     }
 

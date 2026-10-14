@@ -6,7 +6,7 @@ Click-to-comment website review for WordPress. Clients and the team pin comments
 - **Menus and dropdowns too.** Open the menu first, press <kbd>C</kbd>, hover the item and press <kbd>Enter</kbd>. Clicking the overlay never counts as a click outside the menu.
 - **A screenshot with every comment**, taken when the element is picked, with the element outlined. Menus and slides are shown as the reviewer saw them.
 - **Several people at once.** Every comment has a named author; threads take replies; the page refreshes every 20 seconds and when you come back to the tab.
-- **Guests without accounts.** Share a review link; people enter their name once per browser. Authors can edit and delete their own comments (deleted comments go to the trash).
+- **Guests without accounts.** Share a review link; people enter their name once per browser. An email address is asked for only when email notifications are on. Authors can edit and delete their own comments (deleted comments go to the trash).
 - **Screen sizes.** Each thread is labelled mobile, tablet or desktop, and the panel can show only the current size.
 - **Walkthrough.** Step through every open comment on the site, page by page (<kbd>←</kbd> <kbd>→</kbd>). Made for going through feedback with a client on a shared screen.
 - **Notifications** to a Google Chat space (one Chat thread per review thread), and optionally email to everyone in a thread on new replies.
@@ -26,7 +26,9 @@ Requires WordPress 6.9+ (Abilities API) and PHP 8.1+.
 
 ### MCP Adapter (for Claude)
 
-Install the [MCP Adapter](https://github.com/WordPress/mcp-adapter) plugin **from its release zip**, not the Composer source package. The zip ships a Jetpack autoloader, which makes the newest copy win when another plugin bundles an older one. WooCommerce does: without the zip, WooCommerce's MCP Adapter 0.1.0 loads instead.
+If the site already loads MCP Adapter, use that copy and skip this section; a second copy only competes with it. Genero's Bedrock base includes it (`wordpress/mcp-adapter` in composer.json, started by the `gds-mcp-adapter` mu-plugin), and the review server runs on 0.5 and 0.7.
+
+Otherwise install the [MCP Adapter](https://github.com/WordPress/mcp-adapter) plugin **from its release zip**, not the Composer source package. The zip ships a Jetpack autoloader, which makes the newest copy win when another plugin bundles an older one. WooCommerce does: without the zip, WooCommerce's MCP Adapter 0.1.0 loads instead.
 
 ```json
 {
@@ -43,11 +45,16 @@ Install the [MCP Adapter](https://github.com/WordPress/mcp-adapter) plugin **fro
 
 Then `composer require private/mcp-adapter:0.7.0` and `wp plugin activate mcp-adapter`. Without the adapter the overlay and wp-admin work, but Claude has no endpoint.
 
+### Sites that lock down REST or use a CSP
+
+- **REST allowlists.** Guests reach `/wp-json/wprc/v1/…`. Sites that block the REST API for logged-out visitors (Genero Bedrock's `disable-rest-api` mu-plugin) need `wprc` added to the allowlist. The endpoints check the review session themselves, rate limit guests and keep status changes to editors.
+- **Content Security Policy.** The loader is printed with `wp_print_inline_script_tag()`, so nonce-based policies (spatie/laravel-csp) add their nonce, and with `'strict-dynamic'` the overlay and screenshot library it loads are allowed too. Without `'strict-dynamic'`, `script-src` needs `'self'`.
+
 ## Who can comment
 
 | Who | How |
 | --- | --- |
-| Logged-in users with `edit_posts` | Always. The Review buttons show on every page. Editors can change thread status and moderate. |
+| Logged-in users with `edit_posts` | When **Review mode** is on in the admin bar: on by default outside production, off on production so a live site looks normal. Comment links and review links work either way. Editors can change thread status and moderate. |
 | Guests | Through a review round: **Review → Rounds & links → Create review link**. The link is shown once, expires after the chosen number of days and can be revoked. |
 
 Opening a review link swaps the token for a signed, HttpOnly session cookie bound to the round, then removes the token from the address bar. Only a hash of the token is stored. Revoking or expiring the round ends every session made from it. A separate per-browser key (also HttpOnly) is what lets a guest edit their own comments.

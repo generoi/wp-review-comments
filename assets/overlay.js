@@ -486,9 +486,9 @@
     // Guests type their name once; after that it is remembered in this browser.
     const askName = !state.me.name && !store.get('name');
     const noAutofill = { autocomplete: 'off', 'data-1p-ignore': '', 'data-lpignore': 'true', 'data-form-type': 'other' };
-    const nameFields = h('div', { class: 'row', hidden: !askName },
+    const nameFields = h('div', { class: 'row' + (state.me.asks_email ? '' : ' single'), hidden: !askName },
       h('input', { name: 'author_name', required: askName, placeholder: 'Your name', value: store.get('name'), ...noAutofill }),
-      h('input', { name: 'author_email', type: 'email', placeholder: 'Email (optional)', value: store.get('email'), ...noAutofill }),
+      state.me.asks_email ? h('input', { name: 'author_email', type: 'email', placeholder: 'Email for replies (optional)', title: 'Only used to email you when someone replies to this thread', value: store.get('email'), ...noAutofill }) : null,
     );
     const asWho = !state.me.name && !askName ? h('p', { class: 'as' }, 'Commenting as ' + store.get('name') + ' · ',
       h('button', { type: 'button', class: 'link', onclick: (e) => { nameFields.hidden = false; nameFields.querySelector('input').required = true; e.target.parentNode.remove(); } }, 'change')) : null;
@@ -533,7 +533,7 @@
   function guestFields(form) {
     if (state.me.name) return {};
     const name = form.author_name ? form.author_name.value.trim() : store.get('name');
-    const email = form.author_email ? form.author_email.value.trim() : store.get('email');
+    const email = form.author_email ? form.author_email.value.trim() : (state.me.asks_email ? store.get('email') : '');
     if (name) store.set('name', name);
     if (form.author_email) store.set('email', email);
     return { author_name: name, author_email: email };
@@ -570,7 +570,7 @@
     try {
       const thread = await api('/comments', {
         method: 'POST',
-        body: JSON.stringify({ parent: id, text, ...(state.me.name ? {} : { author_name: store.get('name'), author_email: store.get('email') }) }),
+        body: JSON.stringify({ parent: id, text, ...(state.me.name ? {} : { author_name: store.get('name'), author_email: state.me.asks_email ? store.get('email') : '' }) }),
       });
       delete state.drafts[id];
       textarea.value = '';
@@ -961,6 +961,7 @@
       .target { margin: 0; font-size: 12px; color: #71717a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .as { margin: 0; font-size: 12px; color: #71717a; }
       .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+      .row.single { grid-template-columns: 1fr; }
       .actions { display: flex; justify-content: flex-end; gap: 6px; }
       .walkbar:not([hidden]) + .hint { top: 58px; }
       .walkbar { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 6px; background: #18181b; color: #fff; border-radius: 999px; font-size: 13px; box-shadow: 0 6px 24px rgba(0,0,0,.25); max-width: calc(100vw - 24px); }
