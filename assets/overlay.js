@@ -708,15 +708,13 @@
     const html2canvas = await loadScreenshotLibrary();
     const scale = Math.min(1, 1440 / view.width);
     // html2canvas copies the page into a viewport-sized iframe and scrolls it.
-    // WebKit (Safari, and every browser on iOS) refuses that scroll, leaving
-    // all but the top of the copy blank, so give it a copy as tall as the page.
-    const ua = navigator.userAgent;
-    const webkit = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)
-      || (/AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg|OPR|Firefox/.test(ua));
+    // That scroll does not always take (always in WebKit, on some pages in
+    // Chrome too), leaving all but the top of the copy blank, so the copy is
+    // as tall as the page and nothing needs scrolling.
     const canvas = await html2canvas(document.documentElement, {
       ...view,
       windowWidth: document.documentElement.clientWidth,
-      windowHeight: webkit ? document.documentElement.scrollHeight : view.height,
+      windowHeight: document.documentElement.scrollHeight,
       scale,
       useCORS: true,
       logging: false,
@@ -724,7 +722,7 @@
       ignoreElements: (node) => node === host,
       onclone: (doc) => {
         fixClone(doc);
-        if (webkit) pinFixedElements(doc, view);
+        pinFixedElements(doc, view);
         onCopied();
       },
     });
@@ -789,7 +787,7 @@
   }
 
   /**
-   * In the page-tall copy WebKit gets, fixed elements (headers, cookie bars)
+   * In the page-tall copy, fixed elements (headers, cookie bars)
    * would sit at the top of the document. Put them where the reviewer saw
    * them: absolutely positioned at the current scroll offset.
    */
