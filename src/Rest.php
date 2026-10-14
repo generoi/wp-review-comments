@@ -39,8 +39,9 @@ class Rest implements Module
     {
         register_rest_route(self::NAMESPACE, '/boot', [
             'methods' => WP_REST_Server::READABLE,
-            'callback' => fn () => ['script' => Frontend::scriptUrl()],
+            'callback' => [self::class, 'boot'],
             'permission_callback' => '__return_true',
+            'args' => ['url' => ['type' => 'string']],
         ]);
 
         register_rest_route(self::NAMESPACE, '/session', [
@@ -114,6 +115,21 @@ class Rest implements Module
             'permission_callback' => [Session::class, 'isEditor'],
             'args' => ['status' => ['type' => 'string', 'enum' => Store::STATUSES, 'required' => true]],
         ]);
+    }
+
+    /**
+     * Everything the overlay needs to start, in one request: the uncached
+     * script URL, who is looking, and this page's threads.
+     */
+    public static function boot(WP_REST_Request $request): array
+    {
+        $me = self::me();
+
+        return [
+            'script' => Frontend::scriptUrl(),
+            'me' => $me,
+            'threads' => $me['can_comment'] && $request['url'] ? self::listComments($request) : null,
+        ];
     }
 
     public static function startSession(WP_REST_Request $request): array|WP_Error

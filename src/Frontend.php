@@ -51,9 +51,12 @@ class Frontend implements Module
             var on = c.editor || walking || /[?&]review=/.test(location.search) || /(^|; )wprc_on=1/.test(document.cookie) || /^#wprc-\d+$/.test(location.hash);
             if (!on) return;
             window.wprcConfig = c;
-            fetch(c.rest + '/boot?_=' + Date.now(), { credentials: 'same-origin', cache: 'no-store' })
+            var headers = c.nonce ? { 'X-WP-Nonce': c.nonce } : {};
+            fetch(c.rest + '/boot?url=' + encodeURIComponent(location.pathname + location.search) + '&_=' + Date.now(), { credentials: 'same-origin', cache: 'no-store', headers: headers })
                 .then(function (r) { return r.json(); })
                 .then(function (boot) {
+                    if (!boot.script) return;
+                    window.wprcBoot = boot;
                     var s = document.createElement('script');
                     s.src = boot.script;
                     s.defer = true;

@@ -784,13 +784,21 @@
       }
     }
 
-    state.me = await api('/me');
+    // The loader's /boot answer saves two round trips, unless a review link
+    // just started the session and changed who we are.
+    const boot = !token && window.wprcBoot && window.wprcBoot.me ? window.wprcBoot : null;
+    state.me = boot ? boot.me : await api('/me');
     if (!state.me.can_comment) return;
 
     document.body.append(host);
     document.head.append(h('style', {}, 'html.wprc-commenting, html.wprc-commenting * { cursor: crosshair !important; }'));
     renderToolbar();
-    await load();
+    if (boot && Array.isArray(boot.threads)) {
+      state.threads = boot.threads;
+      render();
+    } else {
+      await load();
+    }
 
     state.walk = session.get(WALK_KEY);
     const match = location.hash.match(/^#wprc-(\d+)$/);
