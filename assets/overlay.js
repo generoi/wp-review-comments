@@ -274,6 +274,8 @@
     hint.hidden = !on;
     if (on) {
       closeComposer();
+      // On phones the panel covers most of the page; get it out of the way.
+      if (window.innerWidth < 600) togglePanel(false);
       if (state.hovered) placeHighlight(state.hovered);
       // Ready before picking, so the page is copied before anything changes.
       loadScreenshotLibrary().catch(() => {});
