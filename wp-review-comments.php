@@ -4,7 +4,7 @@
 Plugin Name:  Review Comments
 Plugin URI:   https://github.com/generoi/wp-review-comments
 Description:  Click-to-comment website review for clients and the team, readable by Claude through MCP.
-Version:      0.4.2
+Version:      0.4.3
 Requires at least: 6.9
 Requires PHP: 8.1
 Author:       Genero
@@ -19,7 +19,7 @@ if (! defined('ABSPATH')) {
     exit;
 }
 
-define('WP_REVIEW_COMMENTS_VERSION', '0.4.2');
+define('WP_REVIEW_COMMENTS_VERSION', '0.4.3');
 define('WP_REVIEW_COMMENTS_FILE', __FILE__);
 
 if (file_exists(__DIR__.'/vendor/autoload.php')) {
