@@ -198,7 +198,7 @@
   const panel = h('aside', { class: 'panel', hidden: true });
   const composerEl = h('div', { class: 'composer', hidden: true });
   const toast = h('div', { class: 'toast', hidden: true });
-  root.append(pinLayer, highlight, hint, walkBar, toolbar, panel, composerEl, toast);
+  root.append(pinLayer, highlight, walkBar, hint, toolbar, panel, composerEl, toast);
   // Clicks in the overlay must not reach the page: menus and modals close on
   // "click outside", which would hide the element being commented on.
   for (const type of ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'focusin', 'keydown', 'keyup']) {
@@ -239,6 +239,8 @@
     if (on) {
       closeComposer();
       if (state.hovered) placeHighlight(state.hovered);
+      // Ready before picking, so the page is copied before anything changes.
+      loadScreenshotLibrary().catch(() => {});
     } else {
       highlight.hidden = true;
     }
@@ -434,8 +436,10 @@
     };
     // Picture the page now, while menus or slides are still as the reviewer
     // sees them; it is uploaded once the comment is saved.
-    state.composer.shot = takeScreenshot(el);
-    state.composer.shot.catch(() => {});
+    let copied;
+    const pageCopied = new Promise((resolve) => { copied = resolve; });
+    state.composer.shot = takeScreenshot(el, copied);
+    state.composer.shot.catch(() => {}).finally(copied);
     setCommenting(false);
     placeHighlight(el);
 
@@ -473,7 +477,11 @@
         bottom: 'auto',
       });
     }
-    composerEl.querySelector('textarea').focus();
+    // Focus moves only once the screenshot has copied the page: many menus
+    // close when focus leaves them.
+    const textarea = composerEl.querySelector('textarea');
+    Promise.race([pageCopied, new Promise((resolve) => setTimeout(resolve, 1500))])
+      .then(() => { if (textarea.isConnected && !composerEl.hidden) textarea.focus(); });
   }
 
   function closeComposer() {
@@ -599,7 +607,7 @@
    * JPEG data URL. html2canvas clones the DOM when called, so this records
    * the moment of picking even though rendering finishes later.
    */
-  async function takeScreenshot(el) {
+  async function takeScreenshot(el, onCopied = () => {}) {
     if (!C.screenshotLibrary) return null;
     const rect = el.getBoundingClientRect();
     const view = { x: window.scrollX, y: window.scrollY, width: window.innerWidth, height: window.innerHeight };
@@ -614,6 +622,7 @@
       logging: false,
       backgroundColor: '#ffffff',
       ignoreElements: (node) => node === host,
+      onclone: () => onCopied(),
     });
     const ctx = canvas.getContext('2d');
     ctx.strokeStyle = '#4f46e5';
@@ -645,7 +654,7 @@
         .sort((a, b) => a.url.localeCompare(b.url) || a.created.localeCompare(b.created))
         .map((t) => ({ id: t.id, url: t.url, title: t.page_title }));
       if (!items.length) { showToast('No open comments to walk through.'); return; }
-      const here = items.findIndex((t) => t.url === pageUrl());
+      const here = items.findIndex((t) => normalizeUrl(t.url) === pageUrl());
       state.walk = { items, index: Math.max(0, here) };
       session.set(WALK_KEY, state.walk);
       goToWalkItem();
@@ -657,7 +666,7 @@
   function goToWalkItem() {
     const item = state.walk.items[state.walk.index];
     session.set(WALK_KEY, state.walk);
-    if (item.url !== pageUrl()) {
+    if (normalizeUrl(item.url) !== pageUrl()) {
       location.href = item.url + '#wprc-' + item.id;
       return;
     }
@@ -805,7 +814,7 @@
     if (state.walk) {
       renderWalkBar();
       const item = state.walk.items[state.walk.index];
-      if (item && item.url === pageUrl()) setTimeout(() => focusThread(item.id), 300);
+      if (item && normalizeUrl(item.url) === pageUrl()) setTimeout(() => focusThread(item.id), 300);
     } else if (match) {
       setTimeout(() => focusThread(Number(match[1])), 300);
     } else if (token) {
@@ -884,6 +893,7 @@
       .as { margin: 0; font-size: 12px; color: #71717a; }
       .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
       .actions { display: flex; justify-content: flex-end; gap: 6px; }
+      .walkbar:not([hidden]) + .hint { top: 58px; }
       .walkbar { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 6px; background: #18181b; color: #fff; border-radius: 999px; font-size: 13px; box-shadow: 0 6px 24px rgba(0,0,0,.25); max-width: calc(100vw - 24px); }
       .walkbar button { border: 0; background: #3f3f46; color: #fff; border-radius: 999px; min-width: 30px; height: 30px; font-size: 18px; line-height: 1; }
       .walkbar button:disabled { opacity: .35; cursor: default; }
