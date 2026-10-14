@@ -683,7 +683,10 @@
       logging: false,
       backgroundColor: '#ffffff',
       ignoreElements: (node) => node === host,
-      onclone: () => onCopied(),
+      onclone: (doc) => {
+        fixClone(doc);
+        onCopied();
+      },
     });
     const ctx = canvas.getContext('2d');
     // html2canvas leaves the context scaled and shifted by the scroll offset.
@@ -694,6 +697,55 @@
       ctx.strokeRect(rect.left * scale, rect.top * scale, rect.width * scale, rect.height * scale);
     }
     return canvas.toDataURL('image/jpeg', 0.72);
+  }
+
+  /**
+   * Things html2canvas's copy of the page loses:
+   * - constructed stylesheets (document.adoptedStyleSheets, used by Cookiebot
+   *   and web components), which cloning does not carry over;
+   * - the picture in a video, since the copy does not play.
+   * Styles added to the copy carry the page's CSP nonce, as nonce-based
+   * policies ignore 'unsafe-inline'.
+   */
+  function fixClone(doc) {
+    const nonce = (document.querySelector('script[nonce], style[nonce], link[nonce]') || {}).nonce || '';
+    try {
+      const css = [...(document.adoptedStyleSheets || [])]
+        .map((sheet) => [...sheet.cssRules].map((rule) => rule.cssText).join('\n'))
+        .join('\n');
+      if (css) {
+        const style = doc.createElement('style');
+        if (nonce) style.nonce = nonce;
+        style.textContent = css;
+        doc.head.append(style);
+      }
+    } catch (e) { /* a cross-origin sheet; skip */ }
+
+    const originals = [...document.querySelectorAll('video')];
+    [...doc.querySelectorAll('video')].forEach((copy, i) => {
+      const video = originals[i];
+      if (!video) return;
+      let src = video.poster || '';
+      if (video.videoWidth) {
+        try {
+          const frame = document.createElement('canvas');
+          frame.width = video.videoWidth;
+          frame.height = video.videoHeight;
+          frame.getContext('2d').drawImage(video, 0, 0);
+          src = frame.toDataURL('image/jpeg', 0.8);
+        } catch (e) { /* cross-origin video without CORS: keep the poster */ }
+      }
+      if (!src) return;
+      {
+        const img = doc.createElement('img');
+        img.src = src;
+        img.className = copy.className;
+        img.setAttribute('style', copy.getAttribute('style') || '');
+        const cs = getComputedStyle(video);
+        Object.assign(img.style, { width: cs.width, height: cs.height, objectFit: cs.objectFit, objectPosition: cs.objectPosition });
+        copy.replaceWith(img);
+      }
+    });
   }
 
   /**

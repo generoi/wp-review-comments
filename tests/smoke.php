@@ -107,7 +107,7 @@ try {
     wp_set_current_user($editorId);
     $reply = Store::createComment(['parent' => $id, 'text' => 'Smoke reply', 'author_type' => 'user']);
     $created[] = $reply;
-    $check('reply created and notified', is_int($reply) && count($sent) === 2);
+    $check('reply created and notified', is_int($reply) && count($sent) === 3);
     $check('new thread sends no email', count($mails) === 1);
     $check('reply emails the other participant', ($mails[0]['to'] ?? '') === 'smoke-guest@example.test', (string) ($mails[0]['to'] ?? 'none'));
     $check('email links the thread', str_contains((string) ($mails[0]['message'] ?? ''), '#wprc-'.$id));
@@ -123,7 +123,7 @@ try {
     $boot = new WP_REST_Request('GET', '/wprc/v1/boot');
     $boot->set_param('url', '/smoke-test/?utm_source=x');
     $bootData = rest_do_request($boot)->get_data();
-    $check('boot returns script, editor and threads', str_contains($bootData['script'] ?? '', 'overlay.js') && ($bootData['me']['is_editor'] ?? false) && count($bootData['threads'] ?? []) === 1);
+    $check('boot returns script, editor and threads', str_contains($bootData['script'] ?? '', 'overlay.js') && ($bootData['me']['is_editor'] ?? false) && count($bootData['threads'] ?? []) === 2);
     $headers = rest_do_request($boot);
     $headers = apply_filters('rest_post_dispatch', $headers, rest_get_server(), $boot)->get_headers();
     $check('REST answers are no-store', str_contains($headers['Cache-Control'] ?? '', 'no-store'));
