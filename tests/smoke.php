@@ -192,6 +192,28 @@ try {
     $check('bad status refused', is_wp_error(Store::setStatus($id, 'done')));
     $check('status on a reply refused', is_wp_error(Store::setStatus($reply, 'open')));
 
+    WP_CLI::log('Screenshots');
+    if (function_exists('imagecreatetruecolor')) {
+        $img = imagecreatetruecolor(20, 10);
+        ob_start();
+        imagejpeg($img);
+        $jpeg = ob_get_clean().'<?php echo "appended"; ?>';
+        $shotThread = Store::createComment(['text' => 'Smoke screenshot', 'author_type' => 'user', 'url' => '/smoke-test/', 'selector' => 'body']);
+        $created[] = $shotThread;
+        $url = Store::saveScreenshot($shotThread, 'data:image/jpeg;base64,'.base64_encode($jpeg));
+        $file = trailingslashit(wp_upload_dir()['basedir']).'wp-review-comments/'.get_post_meta($shotThread, '_wprc_screenshot', true);
+        $check('screenshot saved', is_string($url) && is_file($file));
+        $check('re-encoding drops appended data', is_file($file) && ! str_contains((string) file_get_contents($file), 'appended'));
+        $check('second screenshot refused', is_wp_error(Store::saveScreenshot($shotThread, 'data:image/jpeg;base64,'.base64_encode($jpeg))));
+        $check('non-JPEG refused', is_wp_error(Store::saveScreenshot($shotThread, 'data:image/jpeg;base64,'.base64_encode('<?php phpinfo();'))));
+        Store::setStatus($shotThread, 'resolved');
+        update_post_meta($shotThread, '_wprc_status_changed', time() - 31 * DAY_IN_SECONDS);
+        Store::cleanupScreenshots();
+        $check('cleanup removes old resolved screenshots', ! is_file($file) && Store::screenshotUrl($shotThread) === '');
+        $check('cleanup keeps the comment', get_post_status($shotThread) === 'publish');
+        $check('cleanup is scheduled daily', (bool) wp_next_scheduled(Store::CLEANUP_HOOK));
+    }
+
     WP_CLI::log('Abilities (what Claude calls over MCP)');
     if (function_exists('wp_get_ability') && wp_get_ability('review-comments/list-threads')) {
         $list = wp_get_ability('review-comments/list-threads')->execute(['url' => '/smoke-test']);

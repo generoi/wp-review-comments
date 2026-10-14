@@ -60,6 +60,12 @@ class Store implements Module
         add_action('before_delete_post', [self::class, 'beforeDelete']);
         add_action('wp_trash_post', [self::class, 'trashReplies']);
         add_action('untrashed_post', [self::class, 'untrashReplies']);
+        add_action(self::CLEANUP_HOOK, [self::class, 'cleanupScreenshots']);
+        add_action('init', function () {
+            if (! wp_next_scheduled(self::CLEANUP_HOOK)) {
+                wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', self::CLEANUP_HOOK);
+            }
+        });
     }
 
     /**
@@ -304,6 +310,7 @@ class Store implements Module
             return new WP_Error('wprc_bad_status', __('Unknown status.', 'wp-review-comments'), ['status' => 400]);
         }
         self::setMeta($id, '_wprc_status', $status);
+        self::setMeta($id, '_wprc_status_changed', time());
         self::setMeta($id, '_wprc_activity', time());
 
         return true;
@@ -360,12 +367,68 @@ class Store implements Module
         }
         // Unguessable name: the folder is public, like the rest of uploads.
         $file = $id.'-'.wp_generate_password(20, false, false).'.jpg';
+        $bytes = self::reencodeJpeg($bytes);
+        if ($bytes === null) {
+            return new WP_Error('wprc_bad_image', __('Screenshot could not be read.', 'wp-review-comments'), ['status' => 400]);
+        }
         if (file_put_contents($dir.'/'.$file, $bytes) === false) {
             return new WP_Error('wprc_upload_write', __('Cannot write screenshots.', 'wp-review-comments'), ['status' => 500]);
         }
         self::setMeta($id, '_wprc_screenshot', $file);
 
         return trailingslashit($uploads['baseurl']).'wp-review-comments/'.$file;
+    }
+
+    /**
+     * Decode and encode the image again, so only pixels are stored: anything
+     * else a crafted JPEG might carry (metadata, appended data) is dropped.
+     * Without GD the validated original is kept.
+     */
+    private static function reencodeJpeg(string $bytes): ?string
+    {
+        if (! function_exists('imagecreatefromstring') || ! function_exists('imagejpeg')) {
+            return $bytes;
+        }
+        $image = @imagecreatefromstring($bytes);
+        if ($image === false) {
+            return null;
+        }
+        ob_start();
+        imagejpeg($image, null, 75);
+        $clean = (string) ob_get_clean();
+        imagedestroy($image);
+
+        return $clean !== '' ? $clean : null;
+    }
+
+    /** Days after a thread is resolved or won't-fixed that its screenshot is kept. */
+    public const SCREENSHOT_RETENTION_DAYS = 30;
+
+    public const CLEANUP_HOOK = 'wp_review_comments_cleanup';
+
+    /**
+     * Daily: delete screenshots of threads that have been resolved or marked
+     * won't fix for longer than the retention period. The comments stay.
+     */
+    public static function cleanupScreenshots(): void
+    {
+        $days = (int) apply_filters('wp_review_comments_screenshot_retention_days', self::SCREENSHOT_RETENTION_DAYS);
+        $ids = get_posts([
+            'post_type' => self::COMMENT,
+            'post_status' => 'any',
+            'post_parent' => 0,
+            'posts_per_page' => 200,
+            'fields' => 'ids',
+            'meta_query' => [
+                ['key' => '_wprc_screenshot', 'compare' => 'EXISTS'],
+                ['key' => '_wprc_status', 'value' => ['resolved', 'wontfix'], 'compare' => 'IN'],
+                ['key' => '_wprc_status_changed', 'value' => time() - max(0, $days) * DAY_IN_SECONDS, 'compare' => '<', 'type' => 'NUMERIC'],
+            ],
+        ]);
+        foreach ($ids as $id) {
+            self::deleteScreenshot($id);
+            delete_post_meta($id, '_wprc_screenshot');
+        }
     }
 
     public static function screenshotUrl(int $id): string
