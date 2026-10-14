@@ -10,7 +10,7 @@ Click-to-comment website review for WordPress. Clients and the team pin comments
 - **Screen sizes.** Each thread is labelled mobile, tablet or desktop, and the panel can show only the current size.
 - **Walkthrough.** Step through every open comment on the site, page by page (<kbd>←</kbd> <kbd>→</kbd>). Made for going through feedback with a client on a shared screen.
 - **Notifications** to a Google Chat space (one Chat thread per review thread), and optionally email to everyone in a thread on new replies.
-- **Built for Claude.** Each thread stores the page path, post ID, block chain (`wp-block-button / wp-block-gds-hero`, innermost first), nearest heading, CSS selector, text snippet, screen size and screenshot, so Claude can go from a comment straight to the block or template that needs changing.
+- **Built for Claude.** Each thread stores the page path, post ID, block chain (`wp-block-button / wp-block-gds-hero`, innermost first), nearest heading, CSS selector, text snippet, screen size, browser ("Safari 18.4 · iOS 18.4 · touch · 3x") and screenshot, so Claude can go from a comment straight to the block or template that needs changing.
 
 Nothing in the plugin is tied to a theme or host. Block markup gives the richest context, but classic themes work too.
 

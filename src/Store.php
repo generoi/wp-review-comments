@@ -35,6 +35,7 @@ class Store implements Module
         'offset_x' => 'float',
         'offset_y' => 'float',
         'viewport' => 'text',
+        'browser' => 'text',
         'user_agent' => 'text',
     ];
 

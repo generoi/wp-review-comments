@@ -60,6 +60,7 @@ try {
         'snippet' => 'Hello <world>',
         'block' => 'wp-block-heading / wp-block-group',
         'viewport' => '390x844',
+        'browser' => 'Safari 18.4 · iOS 18.4 · touch · 3x',
         'offset_x' => 2,
     ]);
     $check('comment created', is_int($id), is_wp_error($id) ? $id->get_error_message() : '');
@@ -70,6 +71,7 @@ try {
     $check('snippet loses markup', $thread['snippet'] === 'Hello', $thread['snippet']);
     $check('offset clamped to 0..1', $thread['offset_x'] === 1.0);
     $check('device from viewport', $thread['device'] === 'mobile');
+    $check('browser stored', $thread['browser'] === 'Safari 18.4 · iOS 18.4 · touch · 3x', $thread['browser']);
     $check('guest owns the comment', $thread['can_modify'] === true);
     $check('chat notified once', count($sent) === 1);
     $check('chat message names the author', str_contains($sent[0]['body']['text'] ?? '', 'Smoke Guest'));

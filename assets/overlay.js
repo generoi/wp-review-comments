@@ -78,6 +78,35 @@
     return width < 600 ? 'mobile' : width < 1024 ? 'tablet' : 'desktop';
   }
 
+  /**
+   * Readable browser and system, e.g. "Safari 18.4 · iOS 18.4 · touch · 3x".
+   * Layout bugs are often specific to one browser, so reviewers' setups matter.
+   */
+  function browserInfo() {
+    const ua = navigator.userAgent;
+    const find = (pattern) => (ua.match(pattern) || [])[1];
+    const browsers = [
+      ['Edge', /Edg(?:iOS|A)?\/([\d.]+)/], ['Opera', /OPR\/([\d.]+)/], ['Samsung Internet', /SamsungBrowser\/([\d.]+)/],
+      ['Chrome', /CriOS\/([\d.]+)/], ['Firefox', /(?:Firefox|FxiOS)\/([\d.]+)/], ['Chrome', /Chrome\/([\d.]+)/],
+      ['Safari', /Version\/([\d.]+).*Safari/],
+    ];
+    let browser = 'Unknown browser';
+    for (const [name, pattern] of browsers) {
+      const version = find(pattern);
+      if (version) { browser = name + ' ' + version.split('.').slice(0, name === 'Safari' ? 2 : 1).join('.'); break; }
+    }
+    const touch = navigator.maxTouchPoints > 1;
+    let system = 'Unknown system';
+    if (/iPhone|iPad|iPod/.test(ua)) system = 'iOS ' + (find(/OS (\d+[_\d]*)/) || '').replace(/_/g, '.');
+    else if (/Macintosh/.test(ua)) system = touch ? 'iPadOS' : 'macOS';
+    else if (/Android/.test(ua)) system = 'Android ' + (find(/Android ([\d.]+)/) || '');
+    else if (/Windows/.test(ua)) system = 'Windows';
+    else if (/CrOS/.test(ua)) system = 'ChromeOS';
+    else if (/Linux/.test(ua)) system = 'Linux';
+    const ratio = Math.round((window.devicePixelRatio || 1) * 100) / 100;
+    return [browser, system.trim(), touch ? 'touch' : '', ratio !== 1 ? ratio + 'x' : ''].filter(Boolean).join(' · ');
+  }
+
   function h(tag, props = {}, ...children) {
     const el = document.createElement(tag);
     for (const [key, value] of Object.entries(props)) {
@@ -373,7 +402,7 @@
         h('span', { class: 'num status-' + thread.status }, String(thread.n)),
         h('strong', {}, thread.author),
         h('span', { class: 'time' }, timeAgo(thread.created)),
-        thread.device ? h('span', { class: 'device' + (thread.device !== device() ? ' other' : ''), title: 'Written at ' + thread.viewport }, thread.device) : null,
+        thread.device ? h('span', { class: 'device' + (thread.device !== device() ? ' other' : ''), title: 'Written at ' + thread.viewport + (thread.browser ? ' · ' + thread.browser : '') }, thread.device) : null,
         state.me.is_editor
           ? h('select', { class: 'status', title: 'Status', onclick: (e) => e.stopPropagation(), onchange: (e) => setStatus(thread.id, e.target.value) },
             Object.entries(STATUS_LABELS).map(([value, label]) => h('option', { value, selected: value === thread.status }, label)))
@@ -433,6 +462,7 @@
       offset_x: inside && rect.width ? (point.x - rect.left) / rect.width : 0.5,
       offset_y: inside && rect.height ? (point.y - rect.top) / rect.height : 0.5,
       viewport: window.innerWidth + 'x' + window.innerHeight,
+      browser: browserInfo(),
     };
     // Picture the page now, while menus or slides are still as the reviewer
     // sees them; it is uploaded once the comment is saved.

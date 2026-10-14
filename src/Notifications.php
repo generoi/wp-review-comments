@@ -71,7 +71,7 @@ class Notifications implements Module
     public static function chatMessage(array $thread, array $comment, bool $isReply): string
     {
         $where = $thread['page_title'] ?: $thread['url'];
-        $device = $thread['device'] ? ' ('.$thread['device'].')' : '';
+        $device = $thread['device'] ? ' ('.$thread['device'].(! empty($thread['browser']) ? ', '.$thread['browser'] : '').')' : '';
         $verb = $isReply ? 'replied on' : 'commented on';
 
         return sprintf(
