@@ -949,8 +949,9 @@
       }
       return;
     }
-    if (isTyping(event) || fromOverlay(event) || event.metaKey || event.ctrlKey || event.altKey) return;
-    if (state.commenting && event.key === 'Enter' && state.hovered && state.hovered.isConnected) {
+    if (isTyping(event) || event.metaKey || event.ctrlKey || event.altKey) return;
+    // Enter on a focused overlay button presses that button.
+    if (state.commenting && event.key === 'Enter' && !fromOverlay(event) && state.hovered && state.hovered.isConnected) {
       handled(event);
       openComposer(state.hovered, state.pointer);
     } else if ((event.key === 'c' || event.key === 'C') && !(state.composer && composerText().trim())) {
