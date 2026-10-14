@@ -77,6 +77,8 @@ Copying another environment's database over the site replaces its comments, so d
 
 ## Notifications
 
+> **Status:** the Google Chat message format and threading are covered by unit and smoke tests (requests captured, not sent), but delivery to a real Chat space has not been tested yet. Email notifications are smoke-tested the same way.
+
 **Review → Rounds & links → Notifications.** Paste a Google Chat incoming webhook (Space settings → Apps & integrations → Webhooks) to post every new comment and reply to that space, grouped in one Chat thread per review thread. Tick the email option to also email everyone in a thread who left an address when someone replies.
 
 ## Connect Claude
