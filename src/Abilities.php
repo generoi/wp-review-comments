@@ -187,12 +187,13 @@ class Abilities implements Module
             'status' => $input['status'] ?? ['open', 'in_progress'],
             'url' => $input['url'] ?? '',
             'post_id' => $input['post_id'] ?? 0,
-            'limit' => $input['limit'] ?? 100,
+            // The device filter runs on formatted threads, so fetch everything first.
+            'limit' => empty($input['device']) ? ($input['limit'] ?? 100) : 500,
         ]);
 
         $formatted = array_map(fn ($post) => Store::formatThread($post, true), $threads);
         if (! empty($input['device'])) {
-            $formatted = array_values(array_filter($formatted, fn ($thread) => $thread['device'] === $input['device']));
+            $formatted = array_slice(array_values(array_filter($formatted, fn ($thread) => $thread['device'] === $input['device'])), 0, (int) ($input['limit'] ?? 100));
         }
 
         return [
@@ -210,6 +211,9 @@ class Abilities implements Module
         }
         if ($post->post_parent) {
             $post = get_post($post->post_parent);
+            if (! $post || $post->post_type !== Store::COMMENT) {
+                return new WP_Error('wprc_not_found', 'The thread of this reply no longer exists.');
+            }
         }
 
         return ['notice' => self::NOTICE, 'thread' => Store::formatThread($post, true)];

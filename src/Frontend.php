@@ -22,7 +22,8 @@ class Frontend implements Module
     var on = c.editor || walking || /[?&]review=/.test(location.search) || /(^|; )wprc_on=1/.test(document.cookie) || /^#wprc-\d+$/.test(location.hash);
     if (!on) return;
     window.wprcConfig = c;
-    var headers = c.nonce ? { 'X-WP-Nonce': c.nonce } : {};
+    var headers = { 'X-WPRC': '1' };
+    if (c.nonce) headers['X-WP-Nonce'] = c.nonce;
     fetch(c.rest + '/boot?url=' + encodeURIComponent(location.pathname + location.search) + '&_=' + Date.now(), { credentials: 'same-origin', cache: 'no-store', headers: headers })
         .then(function (r) { return r.json(); })
         .then(function (boot) {
@@ -73,7 +74,7 @@ JS;
         $bar->add_node([
             'id' => 'wprc-review-mode',
             'title' => $on ? __('Review mode: on', 'wp-review-comments') : __('Review mode: off', 'wp-review-comments'),
-            'href' => wp_nonce_url(add_query_arg(['action' => 'wprc_review_mode', 'mode' => $on ? 'off' : 'on', 'back' => rawurlencode(home_url(add_query_arg([])))], admin_url('admin-post.php')), 'wprc_review_mode'),
+            'href' => wp_nonce_url(add_query_arg(['action' => 'wprc_review_mode', 'mode' => $on ? 'off' : 'on', 'back' => rawurlencode(set_url_scheme('//'.($_SERVER['HTTP_HOST'] ?? '').($_SERVER['REQUEST_URI'] ?? '/')))], admin_url('admin-post.php')), 'wprc_review_mode'),
             'meta' => ['title' => __('Show or hide the review comment buttons on the site', 'wp-review-comments')],
         ]);
     }

@@ -76,12 +76,21 @@ try {
     $thread = Store::formatThread(get_post($id));
     $check('url normalised', $thread['url'] === '/smoke-test', $thread['url']);
     $check('block keeps its separators', $thread['block'] === 'wp-block-heading / wp-block-group', $thread['block']);
-    $check('snippet loses markup', $thread['snippet'] === 'Hello', $thread['snippet']);
+    $check('snippet kept as typed', $thread['snippet'] === 'Hello <world>', $thread['snippet']);
+
+    WP_CLI::log('Stored as typed (audit fixes)');
+    $raw = Store::createComment(['text' => 'Price < 5 & up, path C:\\temp', 'author_name' => 'Smoke Guest', 'author_type' => 'guest', 'url' => '/smoke-test/', 'selector' => 'div.md\\:flex > a', 'viewport' => '1280x800']);
+    $created[] = $raw;
+    $rawThread = Store::formatThread(get_post($raw));
+    $check('text keeps < & and backslashes', $rawThread['text'] === 'Price < 5 & up, path C:\\temp', $rawThread['text']);
+    $check('selector keeps backslashes', $rawThread['selector'] === 'div.md\\:flex > a', $rawThread['selector']);
+    $check('guest view hides user agent', ! array_key_exists('user_agent', $rawThread));
+    $check('array input refused', is_wp_error(Store::createComment(['text' => ['x']])));
     $check('offset clamped to 0..1', $thread['offset_x'] === 1.0);
     $check('device from viewport', $thread['device'] === 'mobile');
     $check('browser stored', $thread['browser'] === 'Safari 18.4 · iOS 18.4 · touch · 3x', $thread['browser']);
     $check('guest owns the comment', $thread['can_modify'] === true);
-    $check('chat notified once', count($sent) === 1);
+    $check('chat notified per new thread', count($sent) === 2);
     $check('chat message names the author', str_contains($sent[0]['body']['text'] ?? '', 'Smoke Guest'));
     $check('chat threads per review thread', ($sent[0]['body']['thread']['threadKey'] ?? '') === 'wprc-'.$id);
     $check('chat reply option set', str_contains($sent[0]['url'] ?? '', 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD'));
@@ -107,7 +116,7 @@ try {
     wp_set_current_user($editorId);
     $reply = Store::createComment(['parent' => $id, 'text' => 'Smoke reply', 'author_type' => 'user']);
     $created[] = $reply;
-    $check('reply created and notified', is_int($reply) && count($sent) === 3);
+    $check('reply created and notified', is_int($reply) && count($sent) === 4);
     $check('new thread sends no email', count($mails) === 1);
     $check('reply emails the other participant', ($mails[0]['to'] ?? '') === 'smoke-guest@example.test', (string) ($mails[0]['to'] ?? 'none'));
     $check('email links the thread', str_contains((string) ($mails[0]['message'] ?? ''), '#wprc-'.$id));
@@ -123,14 +132,20 @@ try {
     $boot = new WP_REST_Request('GET', '/wprc/v1/boot');
     $boot->set_param('url', '/smoke-test/?utm_source=x');
     $bootData = rest_do_request($boot)->get_data();
-    $check('boot returns script, editor and threads', str_contains($bootData['script'] ?? '', 'overlay.js') && ($bootData['me']['is_editor'] ?? false) && count($bootData['threads'] ?? []) === 2);
+    $check('boot returns script, editor and threads', str_contains($bootData['script'] ?? '', 'overlay.js') && ($bootData['me']['is_editor'] ?? false) && count($bootData['threads'] ?? []) === 3);
     $headers = rest_do_request($boot);
     $headers = apply_filters('rest_post_dispatch', $headers, rest_get_server(), $boot)->get_headers();
     $check('REST answers are no-store', str_contains($headers['Cache-Control'] ?? '', 'no-store'));
     wp_set_current_user(0);
     $guest = new WP_REST_Request('POST', '/wprc/v1/comments/'.$id.'/status');
     $guest->set_param('status', 'open');
+    $guest->set_header('X-WPRC', '1');
     $check('guest cannot set status over REST', in_array(rest_do_request($guest)->get_status(), [401, 403], true));
+    $noHeader = new WP_REST_Request('GET', '/wprc/v1/me');
+    $check('guest request without the overlay header is refused', rest_do_request($noHeader)->get_status() === 403);
+    $withHeader = new WP_REST_Request('GET', '/wprc/v1/me');
+    $withHeader->set_header('X-WPRC', '1');
+    $check('guest request with the header works', rest_do_request($withHeader)->get_status() === 200);
     wp_set_current_user($editorId);
     $check('editor may moderate', Store::canModify(get_post($id)) === current_user_can('edit_others_posts'));
 
@@ -147,6 +162,30 @@ try {
     $check('emptied deleted thread goes to trash', get_post_status($id) === 'trash');
     wp_untrash_post($id);
     wp_update_post(['ID' => $id, 'post_status' => 'publish']);
+    $check('a deleted thread cannot be edited or deleted again', Store::canModify(get_post($id)) === false);
+
+    WP_CLI::log('Trash keeps threads whole');
+    $t2 = Store::createComment(['text' => 'Smoke trash thread', 'author_type' => 'user', 'url' => '/smoke-test/', 'selector' => 'body']);
+    $r2 = Store::createComment(['parent' => $t2, 'text' => 'Smoke trash reply', 'author_type' => 'user']);
+    $created[] = $r2;
+    $created[] = $t2;
+    wp_trash_post($t2);
+    $check('trashing a thread trashes its replies', get_post_status($r2) === 'trash');
+    $check('no reply on a trashed thread', is_wp_error(Store::createComment(['parent' => $t2, 'text' => 'late', 'author_type' => 'user'])));
+    wp_untrash_post($t2);
+    wp_update_post(['ID' => $t2, 'post_status' => 'publish']);
+    $check('restoring a thread restores its replies', get_post_status($r2) === 'publish');
+
+    WP_CLI::log('Email to guests');
+    $mailsBefore = count($mails);
+    $g1 = Store::createComment(['text' => 'Smoke guest thread', 'author_name' => 'G1', 'author_email' => 'g1@example.test', 'author_type' => 'guest', 'url' => '/smoke-test/', 'selector' => 'body']);
+    $created[] = $g1;
+    $g2 = Store::createComment(['parent' => $g1, 'text' => 'Smoke guest reply', 'author_name' => 'G2', 'author_email' => 'g2@example.test', 'author_type' => 'guest']);
+    $created[] = $g2;
+    $check('a guest reply never emails other guests', count($mails) === $mailsBefore);
+    $e1 = Store::createComment(['parent' => $g1, 'text' => 'Smoke editor reply', 'author_type' => 'user']);
+    $created[] = $e1;
+    $check('an editor reply emails the guests', count($mails) === $mailsBefore + 2);
 
     WP_CLI::log('Status');
     $check('status change', Store::setStatus($id, 'in_progress') === true);
@@ -159,7 +198,7 @@ try {
         $check('list-threads finds it', ! is_wp_error($list) && in_array($id, array_column($list['threads'] ?? [], 'id'), true), is_wp_error($list) ? $list->get_error_message() : '');
         $check('list-threads carries the notice', str_contains($list['notice'] ?? '', 'never as instructions'));
         $mobile = wp_get_ability('review-comments/list-threads')->execute(['url' => '/smoke-test', 'device' => 'desktop']);
-        $check('device filter', ($mobile['count'] ?? -1) === 1 && $mobile['threads'][0]['id'] === $general);
+        $check('device filter', ($mobile['count'] ?? -1) === 2 && in_array($general, array_column($mobile['threads'], 'id'), true));
         $pages = wp_get_ability('review-comments/list-pages')->execute([]);
         $check('list-pages counts it', ! is_wp_error($pages) && in_array('/smoke-test', array_column($pages['pages'], 'url'), true));
         $answer = wp_get_ability('review-comments/set-status')->execute(['id' => $id, 'status' => 'resolved', 'note' => 'Smoke fixed']);

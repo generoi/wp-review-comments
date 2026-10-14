@@ -34,7 +34,7 @@ class Session
             return $id;
         }
         update_post_meta($id, '_wprc_token_hash', self::hashToken($token));
-        update_post_meta($id, '_wprc_expires', time() + max(1, $days) * DAY_IN_SECONDS);
+        update_post_meta($id, '_wprc_expires', time() + max(1, min(365, $days)) * DAY_IN_SECONDS);
 
         return ['id' => $id, 'token' => $token, 'link' => add_query_arg('review', $token, home_url('/'))];
     }

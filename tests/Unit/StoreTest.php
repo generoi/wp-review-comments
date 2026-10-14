@@ -54,4 +54,16 @@ class StoreTest extends TestCase
             Notifications::chatMessage($thread, $comment, true)
         );
     }
+
+    public function test_chat_message_cannot_mention_or_link(): void
+    {
+        $thread = ['page_title' => '<users/all>', 'url' => '/', 'device' => '', 'link' => 'https://example.com/#wprc-5'];
+        $comment = ['author' => '*Boss*', 'text' => 'See <https://evil.example|here>'];
+        $message = Notifications::chatMessage($thread, $comment, false);
+
+        $this->assertStringNotContainsString('<users/all>', $message);
+        $this->assertStringNotContainsString('<https://evil.example', $message);
+        $this->assertStringStartsWith('*Boss*', $message);
+        $this->assertStringEndsWith('<https://example.com/#wprc-5|Open on the site>', $message);
+    }
 }

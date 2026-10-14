@@ -58,16 +58,78 @@ class Store implements Module
         add_action('init', [self::class, 'registerPostTypes']);
         add_action('init', [self::class, 'migrate'], 20);
         add_action('before_delete_post', [self::class, 'beforeDelete']);
+        add_action('wp_trash_post', [self::class, 'trashReplies']);
+        add_action('untrashed_post', [self::class, 'untrashReplies']);
     }
 
     /**
-     * Emptying the trash removes the screenshot file too.
+     * Emptying the trash removes the screenshot file, and a thread's replies
+     * go with it, so no reply is left pointing at a missing thread.
      */
     public static function beforeDelete(int $id): void
     {
-        if (get_post_type($id) === self::COMMENT) {
-            self::deleteScreenshot($id);
+        if (get_post_type($id) !== self::COMMENT) {
+            return;
         }
+        self::deleteScreenshot($id);
+        foreach (get_posts(['post_type' => self::COMMENT, 'post_parent' => $id, 'post_status' => 'any', 'posts_per_page' => -1, 'fields' => 'ids']) as $reply) {
+            wp_delete_post($reply, true);
+        }
+    }
+
+    /** A thread moved to the trash takes its replies along. */
+    public static function trashReplies(int $id): void
+    {
+        $post = get_post($id);
+        if (! $post || $post->post_type !== self::COMMENT || $post->post_parent) {
+            return;
+        }
+        foreach (self::replies($id) as $reply) {
+            update_post_meta($reply->ID, '_wprc_trashed_with_thread', 1);
+            wp_trash_post($reply->ID);
+        }
+    }
+
+    /** Restoring a thread restores the replies that were trashed with it. */
+    public static function untrashReplies(int $id): void
+    {
+        if (get_post_type($id) !== self::COMMENT) {
+            return;
+        }
+        foreach (get_posts(['post_type' => self::COMMENT, 'post_parent' => $id, 'post_status' => 'trash', 'posts_per_page' => -1, 'meta_key' => '_wprc_trashed_with_thread']) as $reply) {
+            delete_post_meta($reply->ID, '_wprc_trashed_with_thread');
+            wp_untrash_post($reply->ID);
+            wp_update_post(['ID' => $reply->ID, 'post_status' => 'publish']);
+        }
+    }
+
+    /**
+     * Post meta and post fields are unslashed on save; slash first so
+     * backslashes in selectors (`.md\\:flex`) and text survive.
+     */
+    private static function setMeta(int $id, string $key, mixed $value): void
+    {
+        update_post_meta($id, $key, is_string($value) ? wp_slash($value) : $value);
+    }
+
+    /**
+     * Save post fields as plain text: slashed, and without kses, which would
+     * turn "&" and "<" in a reviewer's text into entities.
+     *
+     * @param  array<string, mixed>  $postarr
+     */
+    private static function savePost(array $postarr): int|WP_Error
+    {
+        $kses = has_filter('content_save_pre', 'wp_filter_post_kses');
+        if ($kses) {
+            kses_remove_filters();
+        }
+        $id = isset($postarr['ID']) ? wp_update_post(wp_slash($postarr), true) : wp_insert_post(wp_slash($postarr), true);
+        if ($kses) {
+            kses_init_filters();
+        }
+
+        return $id;
     }
 
     /**
@@ -79,20 +141,25 @@ class Store implements Module
         if ((int) get_option(self::DB_OPTION, 1) >= self::DB_VERSION) {
             return;
         }
-        update_option(self::DB_OPTION, self::DB_VERSION);
-        $ids = get_posts(['post_type' => self::COMMENT, 'post_status' => 'any', 'post_parent' => 0, 'posts_per_page' => -1, 'fields' => 'ids']);
+        if (get_transient('wprc_migrating')) {
+            return;
+        }
+        set_transient('wprc_migrating', 1, 5 * MINUTE_IN_SECONDS);
+        $ids = get_posts(['post_type' => self::COMMENT, 'post_status' => ['publish', 'trash', 'draft', 'private'], 'post_parent' => 0, 'posts_per_page' => -1, 'fields' => 'ids']);
         foreach ($ids as $id) {
             $url = (string) get_post_meta($id, '_wprc_url', true);
             if ($url !== '') {
-                update_post_meta($id, '_wprc_url', self::normalizeUrl($url));
+                self::setMeta($id, '_wprc_url', self::normalizeUrl($url));
             }
             foreach (['block', 'snippet', 'heading', 'page_title'] as $field) {
                 $value = (string) get_post_meta($id, '_wprc_'.$field, true);
                 if ($value !== '' && $value !== html_entity_decode($value, ENT_QUOTES)) {
-                    update_post_meta($id, '_wprc_'.$field, html_entity_decode($value, ENT_QUOTES));
+                    self::setMeta($id, '_wprc_'.$field, html_entity_decode($value, ENT_QUOTES));
                 }
             }
         }
+        update_option(self::DB_OPTION, self::DB_VERSION);
+        delete_transient('wprc_migrating');
     }
 
     public static function registerPostTypes(): void
@@ -133,51 +200,52 @@ class Store implements Module
         $parent = (int) ($data['parent'] ?? 0);
         if ($parent) {
             $root = get_post($parent);
-            if (! $root || $root->post_type !== self::COMMENT || $root->post_parent) {
+            if (! $root || $root->post_type !== self::COMMENT || $root->post_parent || $root->post_status !== 'publish') {
                 return new WP_Error('wprc_bad_parent', __('Unknown thread.', 'wp-review-comments'), ['status' => 404]);
             }
         }
 
-        $id = wp_insert_post([
+        $id = self::savePost([
             'post_type' => self::COMMENT,
             'post_status' => 'publish',
             'post_title' => wp_trim_words($text, 10, '…'),
             'post_content' => $text,
             'post_parent' => $parent,
             'post_author' => get_current_user_id(),
-        ], true);
+        ]);
         if (is_wp_error($id)) {
             return $id;
         }
 
-        update_post_meta($id, '_wprc_author_name', sanitize_text_field($data['author_name'] ?? ''));
-        update_post_meta($id, '_wprc_author_email', sanitize_email($data['author_email'] ?? ''));
-        update_post_meta($id, '_wprc_author_type', sanitize_key($data['author_type'] ?? 'user'));
-        update_post_meta($id, '_wprc_round', (int) ($data['round'] ?? 0));
-        if (! empty($data['guest_key'])) {
-            update_post_meta($id, '_wprc_guest_key', hash('sha256', (string) $data['guest_key']));
+        $scalar = fn (string $key) => isset($data[$key]) && is_scalar($data[$key]) ? (string) $data[$key] : '';
+        self::setMeta($id, '_wprc_author_name', mb_substr(sanitize_text_field($scalar('author_name')), 0, 100));
+        self::setMeta($id, '_wprc_author_email', sanitize_email($scalar('author_email')));
+        self::setMeta($id, '_wprc_author_type', sanitize_key($scalar('author_type')) ?: 'user');
+        self::setMeta($id, '_wprc_round', (int) $scalar('round'));
+        if ($scalar('guest_key') !== '') {
+            self::setMeta($id, '_wprc_guest_key', hash('sha256', $scalar('guest_key')));
         }
 
         if (! $parent) {
-            update_post_meta($id, '_wprc_status', in_array($data['status'] ?? '', self::STATUSES, true) ? $data['status'] : 'open');
+            self::setMeta($id, '_wprc_status', in_array($data['status'] ?? '', self::STATUSES, true) ? $data['status'] : 'open');
             foreach (self::LOCATION_FIELDS as $field => $type) {
-                if (! isset($data[$field])) {
+                if (! isset($data[$field]) || ! is_scalar($data[$field])) {
                     continue;
                 }
                 $value = match ($type) {
                     'int' => (int) $data[$field],
                     'float' => max(0, min(1, (float) $data[$field])),
-                    // Raw `<` and `>` are fine in meta and escaped on output;
-                    // sanitize_text_field would turn them into entities.
-                    default => mb_substr(trim(wp_strip_all_tags((string) $data[$field], true)), 0, 500),
+                    // Stored as given (selectors and snippets contain `<`, `>` and
+                    // backslashes) and escaped wherever they are output.
+                    default => mb_substr(self::plainLine((string) $data[$field]), 0, $field === 'selector' ? 2000 : 500),
                 };
                 if ($field === 'url') {
                     $value = self::normalizeUrl($value);
                 }
-                update_post_meta($id, '_wprc_'.$field, $value);
+                self::setMeta($id, '_wprc_'.$field, $value);
             }
         }
-        update_post_meta($parent ?: $id, '_wprc_activity', time());
+        self::setMeta($parent ?: $id, '_wprc_activity', time());
 
         do_action(self::ACTION_CREATED, $id, (bool) $parent);
 
@@ -190,8 +258,8 @@ class Store implements Module
         if (is_wp_error($text)) {
             return $text;
         }
-        wp_update_post(['ID' => $id, 'post_content' => $text, 'post_title' => wp_trim_words($text, 10, '…')]);
-        update_post_meta($id, '_wprc_edited', time());
+        self::savePost(['ID' => $id, 'post_content' => $text, 'post_title' => wp_trim_words($text, 10, '…')]);
+        self::setMeta($id, '_wprc_edited', time());
 
         return true;
     }
@@ -208,9 +276,9 @@ class Store implements Module
             return new WP_Error('wprc_not_found', __('Comment not found.', 'wp-review-comments'), ['status' => 404]);
         }
         if (! $post->post_parent && self::replies($id)) {
-            update_post_meta($id, '_wprc_deleted_text', $post->post_content);
-            wp_update_post(['ID' => $id, 'post_content' => '', 'post_title' => __('(deleted)', 'wp-review-comments')]);
-            update_post_meta($id, '_wprc_deleted', time());
+            self::setMeta($id, '_wprc_deleted_text', $post->post_content);
+            self::savePost(['ID' => $id, 'post_content' => '', 'post_title' => __('(deleted)', 'wp-review-comments')]);
+            self::setMeta($id, '_wprc_deleted', time());
 
             return true;
         }
@@ -235,8 +303,8 @@ class Store implements Module
         if (! in_array($status, self::STATUSES, true)) {
             return new WP_Error('wprc_bad_status', __('Unknown status.', 'wp-review-comments'), ['status' => 400]);
         }
-        update_post_meta($id, '_wprc_status', $status);
-        update_post_meta($id, '_wprc_activity', time());
+        self::setMeta($id, '_wprc_status', $status);
+        self::setMeta($id, '_wprc_activity', time());
 
         return true;
     }
@@ -258,6 +326,11 @@ class Store implements Module
 
     public static function canModify(WP_Post $post): bool
     {
+        // Trashed and deleted comments are kept for restoring, not editing.
+        if ($post->post_status !== 'publish' || get_post_meta($post->ID, '_wprc_deleted', true)) {
+            return false;
+        }
+
         return self::isOwnComment($post) || current_user_can('edit_others_posts');
     }
 
@@ -270,7 +343,8 @@ class Store implements Module
             return new WP_Error('wprc_bad_image', __('Screenshot must be a JPEG data URL.', 'wp-review-comments'), ['status' => 400]);
         }
         $bytes = base64_decode($match[1], true);
-        if ($bytes === false || strlen($bytes) > 1.5 * MB_IN_BYTES || ! str_starts_with($bytes, "\xFF\xD8")) {
+        $info = $bytes === false ? false : @getimagesizefromstring($bytes);
+        if ($bytes === false || strlen($bytes) > 1.5 * MB_IN_BYTES || ! $info || $info[2] !== IMAGETYPE_JPEG || $info[0] > 4000 || $info[1] > 4000) {
             return new WP_Error('wprc_bad_image', __('Screenshot is too large or not a JPEG.', 'wp-review-comments'), ['status' => 400]);
         }
         $uploads = wp_upload_dir();
@@ -281,13 +355,15 @@ class Store implements Module
         if (! file_exists($dir.'/index.php')) {
             file_put_contents($dir.'/index.php', "<?php // Silence is golden.\n");
         }
-        self::deleteScreenshot($id);
+        if (get_post_meta($id, '_wprc_screenshot', true)) {
+            return new WP_Error('wprc_has_screenshot', __('This comment already has a screenshot.', 'wp-review-comments'), ['status' => 409]);
+        }
         // Unguessable name: the folder is public, like the rest of uploads.
         $file = $id.'-'.wp_generate_password(20, false, false).'.jpg';
         if (file_put_contents($dir.'/'.$file, $bytes) === false) {
             return new WP_Error('wprc_upload_write', __('Cannot write screenshots.', 'wp-review-comments'), ['status' => 500]);
         }
-        update_post_meta($id, '_wprc_screenshot', $file);
+        self::setMeta($id, '_wprc_screenshot', $file);
 
         return trailingslashit($uploads['baseurl']).'wp-review-comments/'.$file;
     }
@@ -362,6 +438,12 @@ class Store implements Module
     {
         $parts = wp_parse_url($url);
         $path = '/'.ltrim((string) ($parts['path'] ?? '/'), '/');
+        // Stored relative to the site, so home_url($key) gives the page back on
+        // subdirectory installs and multisite too.
+        $home = function_exists('home_url') ? rtrim((string) wp_parse_url(home_url('/'), PHP_URL_PATH), '/') : '';
+        if ($home !== '' && ($path === $home || str_starts_with($path, $home.'/'))) {
+            $path = substr($path, strlen($home)) ?: '/';
+        }
         $path = rtrim($path, '/') ?: '/';
         $query = [];
         if (! empty($parts['query'])) {
@@ -428,8 +510,12 @@ class Store implements Module
             $thread[$field] = match ($type) {
                 'int' => (int) $value,
                 'float' => (float) $value,
-                default => html_entity_decode((string) $value, ENT_QUOTES),
+                default => (string) $value,
             };
+        }
+        if (! $includeEmail) {
+            // Guests do not need each other's full user agent strings.
+            unset($thread['user_agent']);
         }
         $thread['device'] = self::device($thread['viewport']);
         $thread['screenshot'] = self::screenshotUrl($root->ID);
@@ -442,9 +528,19 @@ class Store implements Module
         return $thread;
     }
 
+    /** One line of plain text: valid UTF-8, no control characters. */
+    private static function plainLine(string $value): string
+    {
+        return trim(preg_replace('/\p{C}+/u', ' ', wp_check_invalid_utf8($value)) ?? '');
+    }
+
     private static function cleanText(mixed $text): string|WP_Error
     {
-        $text = trim(sanitize_textarea_field((string) $text));
+        $text = is_scalar($text) ? (string) $text : '';
+        // Plain text, shown with textContent everywhere: keep "<" and "&" as
+        // typed, drop invalid UTF-8 and control characters.
+        $text = wp_check_invalid_utf8($text);
+        $text = trim(preg_replace('/[^\P{C}\n\t]/u', '', str_replace(["\r\n", "\r"], "\n", $text)) ?? '');
         if ($text === '') {
             return new WP_Error('wprc_empty', __('Comment text is required.', 'wp-review-comments'), ['status' => 400]);
         }

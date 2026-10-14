@@ -35,6 +35,9 @@
     hovered: null,
     pointer: { x: 0, y: 0 },
     walk: null,
+    pageKey: null,
+    mutations: 0,
+    composerEl: null,
   };
 
   // --- helpers -------------------------------------------------------------
@@ -51,6 +54,7 @@
 
   async function api(path, options = {}) {
     const headers = { 'Content-Type': 'application/json' };
+    headers['X-WPRC'] = '1';
     if (C.nonce) headers['X-WP-Nonce'] = C.nonce;
     // A unique query keeps edge caches (Kinsta, Cloudflare) out of GETs.
     if (!options.method || options.method === 'GET') path += (path.includes('?') ? '&' : '?') + '_=' + Date.now();
@@ -71,7 +75,8 @@
     const query = params.toString();
     return path + (query ? '?' + query : '');
   }
-  const pageUrl = () => normalizeUrl(location.href);
+  /** This page's key: the server's when known, so comparisons match it exactly. */
+  const pageUrl = () => state.pageKey || normalizeUrl(location.href);
 
   function device(width = window.innerWidth) {
     if (!width) return '';
@@ -239,10 +244,10 @@
   const panel = h('aside', { class: 'panel', hidden: true });
   const composerEl = h('div', { class: 'composer', hidden: true });
   const toast = h('div', { class: 'toast', hidden: true });
-  root.append(pinLayer, highlight, walkBar, hint, toolbar, panel, composerEl, toast);
+  root.append(pinLayer, highlight, walkBar, hint, panel, toolbar, composerEl, toast);
   // Clicks in the overlay must not reach the page: menus and modals close on
   // "click outside", which would hide the element being commented on.
-  for (const type of ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'focusin', 'keydown', 'keyup']) {
+  for (const type of ['click', 'dblclick', 'contextmenu', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'pointermove', 'touchstart', 'touchend', 'focusin', 'focusout', 'keydown', 'keypress', 'keyup', 'input', 'wheel']) {
     host.addEventListener(type, (event) => event.stopPropagation());
   }
 
@@ -292,6 +297,7 @@
 
   function togglePanel(open = !state.panelOpen) {
     state.panelOpen = open;
+    if (!open) state.editingId = null;
     panel.hidden = !open;
     if (open) renderPanel();
   }
@@ -324,7 +330,11 @@
       pin.style.left = rect.left + rect.width * (thread.offset_x || 0) + 'px';
       pin.style.top = rect.top + rect.height * (thread.offset_y || 0) + 'px';
     }
-    if (state.activeId && !highlight.hidden && !state.commenting && !state.composer) {
+    // The outline follows its element while scrolling (and while the phone
+    // keyboard scrolls the page).
+    if (state.composer && state.composerEl && state.composerEl.isConnected) placeHighlight(state.composerEl);
+    else if (state.commenting && state.hovered && state.hovered.isConnected) placeHighlight(state.hovered);
+    else if (state.activeId && !highlight.hidden && !state.commenting && !state.composer) {
       const thread = state.threads.find((t) => t.id === state.activeId);
       const el = thread && findElementCached(thread);
       if (el) placeHighlight(el);
@@ -428,13 +438,16 @@
       ownActions(thread),
       thread.screenshot ? h('a', { class: 'shot', href: thread.screenshot, target: '_blank', rel: 'noopener', title: 'What the reviewer saw' },
         h('img', { src: thread.screenshot, alt: 'Screenshot when the comment was written', loading: 'lazy' })) : null,
-      thread.screenshotFailed ? h('p', { class: 'note' }, 'No screenshot: this browser blocked it. The comment itself is saved.') : null,
+      thread.screenshotFailed ? h('p', { class: 'note' }, thread.screenshotFailed === 'blocked'
+        ? 'No screenshot: this browser blocked it. The comment itself is saved.'
+        : 'The screenshot could not be saved. The comment itself is saved.') : null,
       where ? h('p', { class: 'detached' }, where + '. It was: “' + thread.snippet + '”') : null,
       thread.replies.map((reply) => h('div', { class: 'reply' + (reply.author_type === 'ai' ? ' ai' : '') },
         h('div', { class: 'meta' }, h('strong', {}, reply.author), h('span', { class: 'time' }, timeAgo(reply.created)), ownActions(reply)),
         renderBody(reply),
       )),
       h('form', { class: 'reply-form', onsubmit: (e) => { e.preventDefault(); sendReply(thread.id, e.target); } },
+        !state.me.name && !store.get('name') ? guestNameFields(true) : null,
         h('textarea', {
           rows: 1, placeholder: 'Reply…', value: state.drafts[thread.id] || '',
           oninput: (e) => { state.drafts[thread.id] = e.target.value; },
@@ -484,6 +497,7 @@
       viewport: window.innerWidth + 'x' + window.innerHeight,
       browser: browserInfo(),
     };
+    state.composerEl = el;
     // Picture the page now, while menus or slides are still as the reviewer
     // sees them; it is uploaded once the comment is saved.
     let copied;
@@ -497,11 +511,7 @@
 
     // Guests type their name once; after that it is remembered in this browser.
     const askName = !state.me.name && !store.get('name');
-    const noAutofill = { autocomplete: 'off', 'data-1p-ignore': '', 'data-lpignore': 'true', 'data-form-type': 'other' };
-    const nameFields = h('div', { class: 'row' + (state.me.asks_email ? '' : ' single'), hidden: !askName },
-      h('input', { name: 'author_name', required: askName, placeholder: 'Your name', value: store.get('name'), ...noAutofill }),
-      state.me.asks_email ? h('input', { name: 'author_email', type: 'email', placeholder: 'Email for replies (optional)', title: 'Only used to email you when someone replies to this thread', value: store.get('email'), ...noAutofill }) : null,
-    );
+    const nameFields = guestNameFields(askName);
     const asWho = !state.me.name && !askName ? h('p', { class: 'as' }, 'Commenting as ' + store.get('name') + ' · ',
       h('button', { type: 'button', class: 'link', onclick: (e) => { nameFields.hidden = false; nameFields.querySelector('input').required = true; e.target.parentNode.remove(); } }, 'change')) : null;
 
@@ -539,9 +549,19 @@
       .then(() => { if (textarea.isConnected && !composerEl.hidden) textarea.focus(); });
   }
 
+  /** Name (and, when reply emails are on, email) fields for guests. */
+  function guestNameFields(required) {
+    const noAutofill = { autocomplete: 'off', 'data-1p-ignore': '', 'data-lpignore': 'true', 'data-form-type': 'other' };
+    return h('div', { class: 'row' + (state.me.asks_email ? '' : ' single'), hidden: !required },
+      h('input', { name: 'author_name', required, placeholder: 'Your name', value: store.get('name'), ...noAutofill }),
+      state.me.asks_email ? h('input', { name: 'author_email', type: 'email', placeholder: 'Email for replies (optional)', title: 'Only used to email you when someone replies to this thread', value: store.get('email'), ...noAutofill }) : null,
+    );
+  }
+
   function closeComposer() {
     composerEl.hidden = true;
     state.composer = null;
+    state.composerEl = null;
     highlight.hidden = true;
   }
 
@@ -556,6 +576,9 @@
 
   async function submitComposer(form) {
     const button = form.querySelector('button[type=submit]');
+    // requestSubmit() fires even with the button disabled (held Cmd+Enter).
+    if (!state.composer || form.dataset.busy) return;
+    form.dataset.busy = '1';
     button.disabled = true;
     const { shot, ...where } = state.composer;
     try {
@@ -573,38 +596,50 @@
     }
   }
 
-  async function sendReply(id, form) {
-    const textarea = form.querySelector('textarea');
-    const text = textarea.value.trim();
-    if (!text) return;
-    if (!state.me.name && !store.get('name')) {
-      const name = window.prompt('Your name');
-      if (!name) return;
-      store.set('name', name.trim());
-    }
+  /** Disable a form while its request runs; requestSubmit() ignores disabled buttons. */
+  async function busy(form, work) {
+    if (form.dataset.busy) return;
+    form.dataset.busy = '1';
+    form.querySelectorAll('button').forEach((b) => { b.disabled = true; });
     try {
-      const thread = await api('/comments', {
-        method: 'POST',
-        body: JSON.stringify({ parent: id, text, ...(state.me.name ? {} : { author_name: store.get('name'), author_email: state.me.asks_email ? store.get('email') : '' }) }),
-      });
-      delete state.drafts[id];
-      textarea.value = '';
-      textarea.blur();
-      upsert(thread);
-    } catch (error) {
-      showToast(error.message);
+      await work();
+    } finally {
+      delete form.dataset.busy;
+      form.querySelectorAll('button').forEach((b) => { b.disabled = false; });
     }
   }
 
-  async function saveEdit(id, form) {
-    try {
-      const thread = await api('/comments/' + id, { method: 'PUT', body: JSON.stringify({ text: form.querySelector('textarea').value }) });
-      state.editingId = null;
-      form.querySelector('textarea').blur();
-      upsert(thread);
-    } catch (error) {
-      showToast(error.message);
-    }
+  function sendReply(id, form) {
+    const textarea = form.querySelector('textarea');
+    const text = textarea.value.trim();
+    if (!text) return;
+    return busy(form, async () => {
+      try {
+        const thread = await api('/comments', {
+          method: 'POST',
+          body: JSON.stringify({ parent: id, text, ...guestFields(form) }),
+        });
+        delete state.drafts[id];
+        textarea.value = '';
+        textarea.blur();
+        upsert(thread);
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  }
+
+  function saveEdit(id, form) {
+    return busy(form, async () => {
+      try {
+        const thread = await api('/comments/' + id, { method: 'PUT', body: JSON.stringify({ text: form.querySelector('textarea').value }) });
+        state.editingId = null;
+        form.querySelector('textarea').blur();
+        upsert(thread);
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
   }
 
   async function removeComment(id) {
@@ -613,6 +648,7 @@
       const result = await api('/comments/' + id, { method: 'DELETE' });
       if (result.thread) upsert(result.thread);
       else {
+        state.mutations++;
         const gone = result.removed || id;
         state.threads = state.threads.filter((t) => t.id !== gone);
         if (state.activeId === gone) { state.activeId = null; highlight.hidden = true; }
@@ -632,6 +668,7 @@
   }
 
   function upsert(thread) {
+    state.mutations++;
     const index = state.threads.findIndex((t) => t.id === thread.id);
     if (index === -1) state.threads.push(thread);
     else state.threads[index] = thread;
@@ -667,13 +704,15 @@
     if (!C.screenshotLibrary) return null;
     const rect = el ? el.getBoundingClientRect() : null;
     const view = { x: window.scrollX, y: window.scrollY, width: window.innerWidth, height: window.innerHeight };
-    if (!canvasReadable()) throw new Error('This browser blocks reading canvases (fingerprinting protection)');
+    if (!canvasReadable()) throw Object.assign(new Error('This browser blocks reading canvases (fingerprinting protection)'), { blocked: true });
     const html2canvas = await loadScreenshotLibrary();
     const scale = Math.min(1, 1440 / view.width);
     // html2canvas copies the page into a viewport-sized iframe and scrolls it.
     // WebKit (Safari, and every browser on iOS) refuses that scroll, leaving
     // all but the top of the copy blank, so give it a copy as tall as the page.
-    const webkit = /AppleWebKit/.test(navigator.userAgent) && !/Chrome|Chromium|Edg|OPR/.test(navigator.userAgent);
+    const ua = navigator.userAgent;
+    const webkit = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)
+      || (/AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg|OPR|Firefox/.test(ua));
     const canvas = await html2canvas(document.documentElement, {
       ...view,
       windowWidth: document.documentElement.clientWidth,
@@ -685,6 +724,7 @@
       ignoreElements: (node) => node === host,
       onclone: (doc) => {
         fixClone(doc);
+        if (webkit) pinFixedElements(doc, view);
         onCopied();
       },
     });
@@ -749,6 +789,28 @@
   }
 
   /**
+   * In the page-tall copy WebKit gets, fixed elements (headers, cookie bars)
+   * would sit at the top of the document. Put them where the reviewer saw
+   * them: absolutely positioned at the current scroll offset.
+   */
+  function pinFixedElements(doc, view) {
+    const originals = document.body.getElementsByTagName('*');
+    const copies = doc.body.getElementsByTagName('*');
+    if (originals.length !== copies.length) return;
+    for (let i = 0; i < originals.length; i++) {
+      const el = originals[i];
+      if (el === host || host.contains(el)) continue;
+      const position = getComputedStyle(el).position;
+      if (position !== 'fixed' && position !== 'sticky') continue;
+      const rect = el.getBoundingClientRect();
+      Object.assign(copies[i].style, {
+        position: 'absolute', top: (rect.top + view.y) + 'px', left: (rect.left + view.x) + 'px',
+        width: rect.width + 'px', height: rect.height + 'px', right: 'auto', bottom: 'auto', margin: '0', transform: 'none',
+      });
+    }
+  }
+
+  /**
    * Brave and some privacy settings return blank or noisy pixels from
    * canvases; a screenshot from them would be a white rectangle.
    */
@@ -777,7 +839,7 @@
     } catch (error) {
       console.warn('[wprc] screenshot', error);
       const target = state.threads.find((t) => t.id === id);
-      if (target) { target.screenshotFailed = true; renderPanel(); }
+      if (target) { target.screenshotFailed = error.blocked ? 'blocked' : 'failed'; renderPanel(); }
     }
   }
 
@@ -791,7 +853,7 @@
         .sort((a, b) => a.url.localeCompare(b.url) || a.created.localeCompare(b.created))
         .map((t) => ({ id: t.id, url: t.url, title: t.page_title }));
       if (!items.length) { showToast('No open comments to walk through.'); return; }
-      const here = items.findIndex((t) => normalizeUrl(t.url) === pageUrl());
+      const here = items.findIndex((t) => t.url === pageUrl());
       state.walk = { items, index: Math.max(0, here) };
       session.set(WALK_KEY, state.walk);
       goToWalkItem();
@@ -803,7 +865,7 @@
   function goToWalkItem() {
     const item = state.walk.items[state.walk.index];
     session.set(WALK_KEY, state.walk);
-    if (normalizeUrl(item.url) !== pageUrl()) {
+    if (item.url !== pageUrl()) {
       location.href = item.url + '#wprc-' + item.id;
       return;
     }
@@ -845,7 +907,12 @@
     return el && el !== host && el.nodeType === 1 && el !== document.documentElement && el !== document.body ? el : null;
   }
 
+  /** Page listeners stay inert until the overlay has started for someone who may comment. */
+  const active = () => !!(state.me && state.me.can_comment && host.isConnected);
+  const fromOverlay = (event) => event.composedPath().includes(host);
+
   document.addEventListener('mousemove', (event) => {
+    if (!active()) return;
     state.pointer = { x: event.clientX, y: event.clientY };
     const el = pageTarget(event);
     if (el) state.hovered = el;
@@ -855,7 +922,7 @@
   // Capture phase, so links and buttons do not act while picking a spot.
   for (const type of ['click', 'pointerdown', 'mousedown', 'submit']) {
     document.addEventListener(type, (event) => {
-      if (!state.commenting || event.target === host) return;
+      if (!active() || !state.commenting || fromOverlay(event)) return;
       event.preventDefault();
       event.stopPropagation();
       if (type === 'click') {
@@ -865,54 +932,77 @@
     }, true);
   }
 
+  /** Keys the overlay handles do nothing else on the page. */
+  const handled = (event) => { event.preventDefault(); event.stopPropagation(); };
+  const composerText = () => (composerEl.querySelector('textarea') || {}).value || '';
+
   // Capture phase too: Enter must not activate the hovered link.
   document.addEventListener('keydown', (event) => {
+    if (!active()) return;
     if (event.key === 'Escape') {
-      if (state.commenting) setCommenting(false);
-      else if (state.composer) closeComposer();
+      if (state.commenting) {
+        handled(event);
+        setCommenting(false);
+      } else if (state.composer && !composerText().trim()) {
+        handled(event);
+        closeComposer();
+      }
       return;
     }
-    if (isTyping(event) || event.metaKey || event.ctrlKey || event.altKey) return;
-    if (state.commenting && event.key === 'Enter' && state.hovered) {
-      event.preventDefault();
-      event.stopPropagation();
+    if (isTyping(event) || fromOverlay(event) || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (state.commenting && event.key === 'Enter' && state.hovered && state.hovered.isConnected) {
+      handled(event);
       openComposer(state.hovered, state.pointer);
-    } else if (event.key === 'c' || event.key === 'C') {
+    } else if ((event.key === 'c' || event.key === 'C') && !(state.composer && composerText().trim())) {
       // Opening a dropdown first and then pressing C keeps it open, unlike
-      // clicking the button, which counts as a click outside the menu.
-      event.preventDefault();
+      // clicking the button, which counts as a click outside the menu. A
+      // composer with text in it is never thrown away by a stray C.
+      handled(event);
       setCommenting(!state.commenting);
-    } else if (state.walk && event.key === 'ArrowRight') {
-      stepWalk(1);
-    } else if (state.walk && event.key === 'ArrowLeft') {
-      stepWalk(-1);
+    } else if (state.walk && (event.key === 'ArrowRight' || event.key === 'ArrowLeft')) {
+      handled(event);
+      stepWalk(event.key === 'ArrowRight' ? 1 : -1);
     }
   }, true);
 
   let frame = 0;
   const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(positionPins); };
-  window.addEventListener('scroll', schedule, { passive: true, capture: true });
+  window.addEventListener('scroll', () => { if (active()) schedule(); }, { passive: true, capture: true });
   let lastDevice = device();
+  let lastWidth = window.innerWidth;
   window.addEventListener('resize', () => {
-    elementCache.clear();
+    if (!active()) return;
+    // Mobile browsers fire resize while scrolling (the address bar); only a
+    // width change can move elements around.
+    if (window.innerWidth !== lastWidth) {
+      lastWidth = window.innerWidth;
+      elementCache.clear();
+    }
     schedule();
     if (device() !== lastDevice) { lastDevice = device(); render(); }
   });
 
   window.addEventListener('hashchange', () => {
+    if (!active()) return;
     const match = location.hash.match(/^#wprc-(\d+)$/);
     if (match) focusThread(Number(match[1]));
   });
 
   // --- boot ----------------------------------------------------------------
 
+  let loadSeq = 0;
   async function load() {
-    state.threads = await api('/comments?url=' + encodeURIComponent(pageUrl()));
+    const seq = ++loadSeq;
+    const mutationsBefore = state.mutations;
+    const threads = await api('/comments?url=' + encodeURIComponent(pageUrl()));
+    // A newer load, or a change made while this one was in flight, wins.
+    if (seq !== loadSeq || state.mutations !== mutationsBefore) return;
+    state.threads = threads;
     elementCache.clear();
     render();
   }
 
-  const canRefresh = () => document.visibilityState === 'visible' && !state.composer && state.editingId === null;
+  const canRefresh = () => document.visibilityState === 'visible' && !state.composer && !panel.querySelector('.edit-form');
 
   async function boot() {
     const params = new URLSearchParams(location.search);
@@ -934,6 +1024,11 @@
     // just started the session and changed who we are.
     const boot = !token && window.wprcBoot && window.wprcBoot.me ? window.wprcBoot : null;
     state.me = boot ? boot.me : await api('/me');
+    if (boot && boot.page) state.pageKey = boot.page;
+    if (!state.me.can_comment) {
+      // A revoked or expired round: stop loading the overlay on every page.
+      document.cookie = 'wprc_on=; Max-Age=0; path=/';
+    }
     if (!state.me.can_comment) return;
 
     document.body.append(host);
@@ -951,7 +1046,7 @@
     if (state.walk) {
       renderWalkBar();
       const item = state.walk.items[state.walk.index];
-      if (item && normalizeUrl(item.url) === pageUrl()) setTimeout(() => focusThread(item.id), 300);
+      if (item && item.url === pageUrl()) setTimeout(() => focusThread(item.id), 300);
     } else if (match) {
       setTimeout(() => focusThread(Number(match[1])), 300);
     } else if (token) {
@@ -973,6 +1068,8 @@
       [hidden] { display: none !important; }
       button { font: inherit; cursor: pointer; }
       .toolbar { position: fixed; right: 16px; bottom: 16px; display: flex; gap: 8px; }
+      /* Keep the buttons reachable while the panel is open. */
+      .panel:not([hidden]) + .toolbar { right: 396px; }
       .toolbar button { display: inline-flex; align-items: center; gap: 6px; padding: 10px 14px; border-radius: 999px; border: 1px solid #d4d4d8; background: #fff; color: #18181b; font-size: 14px; font-weight: 600; box-shadow: 0 4px 16px rgba(0,0,0,.15); }
       .toolbar button.primary { background: #4f46e5; border-color: #4f46e5; color: #fff; }
       .toolbar button.active { background: #18181b; border-color: #18181b; }
@@ -1020,7 +1117,9 @@
       .reply { margin: 10px 0 0 14px; padding-left: 10px; border-left: 2px solid #e4e4e7; }
       .reply.ai { border-left-color: #a78bfa; }
       .reply .meta { cursor: default; }
-      .reply-form { display: flex; gap: 6px; margin-top: 10px; }
+      .reply-form { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+      .reply-form .row { flex-basis: 100%; }
+      .reply-form textarea { flex: 1; }
       .edit-form { display: grid; gap: 6px; margin-top: 6px; }
       textarea, input[type=text], input:not([type]), input[type=email] { font: inherit; font-size: 16px; width: 100%; padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 8px; color: #18181b; background: #fff; resize: vertical; }
       textarea:focus, input:focus { outline: 2px solid #4f46e5; outline-offset: -1px; border-color: transparent; }
@@ -1046,6 +1145,7 @@
       @media (max-width: 600px) {
         .panel { top: auto; left: 0; right: 0; width: auto; height: 70vh; border-radius: 14px 14px 0 0; }
         .toolbar { right: 12px; bottom: 12px; }
+        .panel:not([hidden]) + .toolbar { right: 12px; bottom: calc(70vh + 12px); }
         .row { grid-template-columns: 1fr; }
         .walkbar .page { display: none; }
         .hint { top: auto; bottom: 64px; }

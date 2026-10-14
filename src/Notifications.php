@@ -48,10 +48,10 @@ class Notifications implements Module
     public function notify(int $id, bool $isReply): void
     {
         $post = get_post($id);
-        if (! $post) {
+        $root = $post && $isReply ? get_post($post->post_parent) : $post;
+        if (! $post || ! $root) {
             return;
         }
-        $root = $isReply ? get_post($post->post_parent) : $post;
         $thread = Store::formatThread($root, true);
         $comment = Store::formatComment($post, true);
         $settings = self::settings();
@@ -62,6 +62,16 @@ class Notifications implements Module
         if ($settings['email_participants'] && $isReply) {
             self::emailParticipants($thread, $comment);
         }
+    }
+
+    /**
+     * Reviewer text in a Chat message: Chat reads <…> as links and mentions
+     * (<users/all> pings the whole space), so angle brackets and the link
+     * separator are swapped for look-alikes.
+     */
+    public static function chatSafe(string $text): string
+    {
+        return strtr($text, ['<' => '‹', '>' => '›', '|' => '¦']);
     }
 
     /**
@@ -76,12 +86,12 @@ class Notifications implements Module
 
         return sprintf(
             "*%s* %s %s%s:\n%s\n<%s|Open on the site>",
-            $comment['author'],
+            self::chatSafe(str_replace('*', '', $comment['author'])),
             $verb,
-            $where,
-            $device,
-            wp_trim_words($comment['text'], 60, '…'),
-            $thread['link']
+            self::chatSafe($where),
+            self::chatSafe($device),
+            self::chatSafe(wp_trim_words($comment['text'], 60, '…')),
+            esc_url_raw($thread['link'])
         );
     }
 
@@ -109,12 +119,16 @@ class Notifications implements Module
      */
     private static function emailParticipants(array $thread, array $comment): void
     {
+        // Guest addresses are unverified: a guest's reply only reaches people
+        // with an account, so a review link cannot be used to mail strangers.
+        $byGuest = ($comment['author_type'] ?? '') === 'guest';
         $emails = [];
         foreach (array_merge([$thread], $thread['replies']) as $entry) {
             $email = strtolower((string) ($entry['author_email'] ?? ''));
-            if ($email !== '' && is_email($email)) {
-                $emails[$email] = true;
+            if ($email === '' || ! is_email($email) || ($byGuest && ($entry['author_type'] ?? '') === 'guest')) {
+                continue;
             }
+            $emails[$email] = true;
         }
         unset($emails[strtolower((string) ($comment['author_email'] ?? ''))]);
         if (! $emails) {
@@ -128,7 +142,7 @@ class Notifications implements Module
             __('Open the thread:', 'wp-review-comments'),
             $thread['link']
         );
-        foreach (array_keys($emails) as $email) {
+        foreach (array_slice(array_keys($emails), 0, 20) as $email) {
             wp_mail($email, $subject, $body);
         }
     }

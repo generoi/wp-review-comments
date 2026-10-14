@@ -26,3 +26,10 @@ if (! function_exists('wp_trim_words')) {
         return count($words) > $num_words ? implode(' ', array_slice($words, 0, $num_words)).($more ?? '…') : implode(' ', $words);
     }
 }
+
+if (! function_exists('esc_url_raw')) {
+    function esc_url_raw($url)
+    {
+        return (string) $url;
+    }
+}

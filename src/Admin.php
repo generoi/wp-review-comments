@@ -12,6 +12,9 @@ class Admin implements Module
 {
     public const MENU_SLUG = 'wp-review-comments';
 
+    /** Inviting outside guests is an editor's call, not a contributor's. */
+    public const ROUND_CAP = 'edit_others_posts';
+
     public function register(): void
     {
         add_action('admin_menu', [$this, 'menu']);
@@ -150,7 +153,7 @@ class Admin implements Module
     public function createRound(): void
     {
         check_admin_referer('wprc_create_round');
-        if (! current_user_can('edit_posts')) {
+        if (! current_user_can(self::ROUND_CAP)) {
             wp_die('', 403);
         }
         $round = Session::createRound((string) wp_unslash($_POST['name'] ?? ''), (int) ($_POST['days'] ?? 30));
@@ -164,10 +167,13 @@ class Admin implements Module
     public function revokeRound(): void
     {
         check_admin_referer('wprc_revoke_round');
-        if (! current_user_can('edit_posts')) {
+        if (! current_user_can(self::ROUND_CAP)) {
             wp_die('', 403);
         }
-        Session::revokeRound((int) ($_POST['round'] ?? 0));
+        $round = (int) ($_POST['round'] ?? 0);
+        if (get_post_type($round) === Store::ROUND) {
+            Session::revokeRound($round);
+        }
         wp_safe_redirect(admin_url('admin.php?page='.self::MENU_SLUG));
         exit;
     }

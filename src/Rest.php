@@ -19,6 +19,28 @@ class Rest implements Module
     {
         add_action('rest_api_init', [self::class, 'routes']);
         add_filter('rest_post_dispatch', [self::class, 'noCache'], 10, 3);
+        add_filter('rest_pre_dispatch', [self::class, 'requireOverlayHeader'], 10, 3);
+    }
+
+    /** Header the overlay sends with every request. */
+    public const HEADER = 'X-WPRC';
+
+    /**
+     * Guests authenticate with cookies only, so require a custom header on
+     * their requests: browsers cannot send it cross-site without a CORS
+     * preflight, which WordPress does not allow for it. Logged-in users are
+     * covered by the REST nonce.
+     */
+    public static function requireOverlayHeader(mixed $result, mixed $server, WP_REST_Request $request): mixed
+    {
+        if ($result !== null || ! str_starts_with($request->get_route(), '/'.self::NAMESPACE) || is_user_logged_in()) {
+            return $result;
+        }
+        if ($request->get_header(strtolower(str_replace('-', '_', self::HEADER))) !== '1') {
+            return new WP_Error('wprc_missing_header', __('Requests must come from the review overlay.', 'wp-review-comments'), ['status' => 403]);
+        }
+
+        return $result;
     }
 
     /**
@@ -125,10 +147,14 @@ class Rest implements Module
     {
         $me = self::me();
 
+        $url = is_string($request['url']) ? $request['url'] : '';
+
         return [
             'script' => Frontend::scriptUrl(),
             'me' => $me,
-            'threads' => $me['can_comment'] && $request['url'] ? self::listComments($request) : null,
+            // The server's key for this page, so the overlay compares URLs the same way.
+            'page' => $url !== '' ? Store::normalizeUrl($url) : null,
+            'threads' => $me['can_comment'] && $url !== '' ? self::listComments($request) : null,
         ];
     }
 
@@ -166,7 +192,7 @@ class Rest implements Module
      */
     public static function listAllThreads(): array
     {
-        $threads = array_filter(Store::queryThreads(['limit' => 500]), fn (WP_Post $post) => ! get_post_meta($post->ID, '_wprc_deleted', true));
+        $threads = array_filter(Store::queryThreads(['limit' => 500]), fn (WP_Post $post) => ! get_post_meta($post->ID, '_wprc_deleted', true) || Store::replies($post->ID));
 
         return array_values(array_map(fn (WP_Post $post) => [
             'id' => $post->ID,
@@ -195,7 +221,8 @@ class Rest implements Module
         if ($limited = self::rateLimit('comment', 60)) {
             return $limited;
         }
-        $data = (array) $request->get_json_params();
+        // Only scalar values; arrays and objects are not valid for any field.
+        $data = array_filter((array) $request->get_json_params(), 'is_scalar');
         $user = wp_get_current_user();
         if ($user->exists()) {
             $data['author_name'] = $user->display_name;
@@ -211,6 +238,9 @@ class Rest implements Module
             $data['guest_key'] = Session::ensureGuestKey();
         }
         $data['round'] = Session::currentRound() ?? 0;
+        if ($data['round'] && ! Session::isEditor() && ($limited = self::rateLimit('round_'.$data['round'], 300, false))) {
+            return $limited;
+        }
         $data['user_agent'] = $request->get_header('user_agent');
         unset($data['status']);
 
@@ -229,6 +259,18 @@ class Rest implements Module
         return $post && $post->post_type === Store::COMMENT && Session::canComment() && Store::canModify($post);
     }
 
+    /** Thread of a comment, or null when the thread itself is gone. */
+    private static function rootOf(int $id): ?WP_Post
+    {
+        $post = get_post($id);
+        if (! $post || $post->post_type !== Store::COMMENT) {
+            return null;
+        }
+        $root = $post->post_parent ? get_post($post->post_parent) : $post;
+
+        return $root && $root->post_type === Store::COMMENT ? $root : null;
+    }
+
     public static function editComment(WP_REST_Request $request): array|WP_Error
     {
         $id = (int) $request['id'];
@@ -240,8 +282,8 @@ class Rest implements Module
     public static function deleteComment(WP_REST_Request $request): array|WP_Error
     {
         $id = (int) $request['id'];
-        $post = get_post($id);
-        $rootId = $post->post_parent ?: $id;
+        $root = self::rootOf($id);
+        $rootId = $root ? $root->ID : $id;
         $result = Store::deleteComment($id);
         if (is_wp_error($result)) {
             return $result;
@@ -255,6 +297,9 @@ class Rest implements Module
     public static function saveScreenshot(WP_REST_Request $request): array|WP_Error
     {
         $id = (int) $request['id'];
+        if ($limited = self::rateLimit('screenshot', 60)) {
+            return $limited;
+        }
         if (get_post($id)->post_parent) {
             return new WP_Error('wprc_not_thread', __('Screenshots belong to threads.', 'wp-review-comments'), ['status' => 400]);
         }
@@ -273,10 +318,12 @@ class Rest implements Module
         return self::threadOf((int) $request['id']);
     }
 
-    private static function threadOf(int $id): array
+    private static function threadOf(int $id): array|WP_Error
     {
-        $post = get_post($id);
-        $root = $post->post_parent ? get_post($post->post_parent) : $post;
+        $root = self::rootOf($id);
+        if (! $root) {
+            return new WP_Error('wprc_not_found', __('Thread not found.', 'wp-review-comments'), ['status' => 404]);
+        }
 
         return Store::formatThread($root, Session::isEditor());
     }
@@ -284,13 +331,17 @@ class Rest implements Module
     /**
      * Simple per-IP limit: $max requests per action every 10 minutes.
      */
-    private static function rateLimit(string $action, int $max): ?WP_Error
+    private static function rateLimit(string $action, int $max, bool $perIp = true): ?WP_Error
     {
         if (Session::isEditor()) {
             return null;
         }
-        $ip = $_SERVER['REMOTE_ADDR'] ?? '';
-        $key = 'wprc_rl_'.$action.'_'.md5($ip);
+        /**
+         * Client IP used for rate limits. Behind a proxy that does not rewrite
+         * REMOTE_ADDR, return the forwarded address here.
+         */
+        $ip = (string) apply_filters('wp_review_comments_client_ip', $_SERVER['REMOTE_ADDR'] ?? '');
+        $key = 'wprc_rl_'.$action.($perIp ? '_'.md5($ip) : '');
         $count = (int) get_transient($key);
         if ($count >= $max) {
             return new WP_Error('wprc_rate_limited', __('Too many requests, try again in a few minutes.', 'wp-review-comments'), ['status' => 429]);
