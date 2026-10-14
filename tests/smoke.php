@@ -105,6 +105,9 @@ try {
     $check('reply moved to trash', get_post_status($reply) === 'trash');
     $check('trashed reply not listed', Store::replies($id) === []);
     $check('deleted thread text kept for restoring', get_post_meta($id, '_wprc_deleted_text', true) === 'Smoke test comment, edited');
+    $check('emptied deleted thread goes to trash', get_post_status($id) === 'trash');
+    wp_untrash_post($id);
+    wp_update_post(['ID' => $id, 'post_status' => 'publish']);
 
     WP_CLI::log('Status');
     $check('status change', Store::setStatus($id, 'in_progress') === true);

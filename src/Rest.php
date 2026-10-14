@@ -243,8 +243,9 @@ class Rest implements Module
             return $result;
         }
         $root = get_post($rootId);
+        $visible = $root && $root->post_status === 'publish';
 
-        return ['deleted' => $id, 'thread' => $root ? Store::formatThread($root, Session::isEditor()) : null];
+        return ['deleted' => $id, 'thread' => $visible ? Store::formatThread($root, Session::isEditor()) : null, 'removed' => $visible ? null : $rootId];
     }
 
     public static function saveScreenshot(WP_REST_Request $request): array|WP_Error

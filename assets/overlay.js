@@ -558,8 +558,9 @@
       const result = await api('/comments/' + id, { method: 'DELETE' });
       if (result.thread) upsert(result.thread);
       else {
-        state.threads = state.threads.filter((t) => t.id !== id);
-        if (state.activeId === id) { state.activeId = null; highlight.hidden = true; }
+        const gone = result.removed || id;
+        state.threads = state.threads.filter((t) => t.id !== gone);
+        if (state.activeId === gone) { state.activeId = null; highlight.hidden = true; }
         render();
       }
     } catch (error) {

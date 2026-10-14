@@ -214,7 +214,15 @@ class Store implements Module
             return true;
         }
 
-        return wp_trash_post($id) ? true : new WP_Error('wprc_delete_failed', __('Could not delete the comment.', 'wp-review-comments'), ['status' => 500]);
+        if (! wp_trash_post($id)) {
+            return new WP_Error('wprc_delete_failed', __('Could not delete the comment.', 'wp-review-comments'), ['status' => 500]);
+        }
+        // A deleted thread only stayed for its replies.
+        if ($post->post_parent && get_post_meta($post->post_parent, '_wprc_deleted', true) && ! self::replies($post->post_parent)) {
+            wp_trash_post($post->post_parent);
+        }
+
+        return true;
     }
 
     public static function setStatus(int $id, string $status): true|WP_Error
