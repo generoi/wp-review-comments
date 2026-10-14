@@ -19,6 +19,9 @@ class Session
     /** Readable by JS; only tells the loader to start the overlay. */
     public const FLAG_COOKIE = 'wprc_on';
 
+    /** Random per-browser key (HttpOnly) that lets a guest edit their own comments. */
+    public const GUEST_COOKIE = 'wprc_guest';
+
     public static function createRound(string $name, int $days): array|WP_Error
     {
         $token = wp_generate_password(32, false, false);
@@ -81,6 +84,7 @@ class Session
         $value = $round.'.'.$expires.'.'.self::sign($round, $expires);
         self::setCookie(self::COOKIE, $value, $expires, true);
         self::setCookie(self::FLAG_COOKIE, '1', $expires, false);
+        self::ensureGuestKey();
 
         return $round;
     }
@@ -110,6 +114,28 @@ class Session
         return self::isRoundActive($round) ? $round : null;
     }
 
+    public static function guestKey(): ?string
+    {
+        $key = $_COOKIE[self::GUEST_COOKIE] ?? '';
+
+        return is_string($key) && preg_match('/^[A-Za-z0-9]{32}$/', $key) ? $key : null;
+    }
+
+    /**
+     * The guest key for this browser, created on first use.
+     */
+    public static function ensureGuestKey(): string
+    {
+        $key = self::guestKey();
+        if ($key === null) {
+            $key = wp_generate_password(32, false, false);
+            self::setCookie(self::GUEST_COOKIE, $key, time() + YEAR_IN_SECONDS, true);
+            $_COOKIE[self::GUEST_COOKIE] = $key;
+        }
+
+        return $key;
+    }
+
     public static function isEditor(): bool
     {
         return current_user_can('edit_posts');
@@ -136,7 +162,7 @@ class Session
     {
         setcookie($name, $value, [
             'expires' => $expires,
-            'path' => COOKIEPATH ?: '/',
+            'path' => COOKIEPATH,
             'domain' => COOKIE_DOMAIN ?: '',
             'secure' => is_ssl(),
             'httponly' => $httpOnly,

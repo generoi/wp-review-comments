@@ -11,6 +11,7 @@ class Plugin
         Abilities::class,
         Admin::class,
         Frontend::class,
+        Notifications::class,
     ];
 
     public const FILTER_MODULES = 'wp_review_comments_modules';

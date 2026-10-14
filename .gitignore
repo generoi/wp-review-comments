@@ -5,3 +5,4 @@
 /test-results/
 /playwright-report/
 /tests/wp-tests-config.php
+/.phpunit.cache/

@@ -17,6 +17,7 @@ class Admin implements Module
         add_action('admin_menu', [$this, 'menu']);
         add_action('admin_post_wprc_create_round', [$this, 'createRound']);
         add_action('admin_post_wprc_revoke_round', [$this, 'revokeRound']);
+        add_action('admin_post_wprc_save_settings', [$this, 'saveSettings']);
         add_action('pre_get_posts', [$this, 'onlyRootThreads']);
         add_filter('manage_'.Store::COMMENT.'_posts_columns', [$this, 'columns']);
         add_action('manage_'.Store::COMMENT.'_posts_custom_column', [$this, 'column'], 10, 2);
@@ -113,6 +114,27 @@ class Admin implements Module
                 </tbody>
             </table>
 
+            <h2><?php esc_html_e('Notifications', 'wp-review-comments'); ?></h2>
+            <?php $settings = Notifications::settings(); ?>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <?php wp_nonce_field('wprc_save_settings'); ?>
+                <input type="hidden" name="action" value="wprc_save_settings">
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row"><label for="wprc-webhook"><?php esc_html_e('Google Chat webhook', 'wp-review-comments'); ?></label></th>
+                        <td>
+                            <input id="wprc-webhook" name="chat_webhook" type="url" class="large-text code" value="<?php echo esc_attr($settings['chat_webhook']); ?>" placeholder="https://chat.googleapis.com/v1/spaces/…/messages?key=…&amp;token=…">
+                            <p class="description"><?php esc_html_e('Space settings → Apps & integrations → Webhooks. Every new comment and reply is posted there, one Chat thread per review thread.', 'wp-review-comments'); ?></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e('Email', 'wp-review-comments'); ?></th>
+                        <td><label><input name="email_participants" type="checkbox" value="1" <?php checked($settings['email_participants']); ?>> <?php esc_html_e('Email everyone in a thread (who left an email address) when someone replies', 'wp-review-comments'); ?></label></td>
+                    </tr>
+                </table>
+                <?php submit_button(__('Save notifications', 'wp-review-comments')); ?>
+            </form>
+
             <h2><?php esc_html_e('Connect Claude', 'wp-review-comments'); ?></h2>
             <?php if (class_exists('\WP\MCP\Core\McpAdapter')) { ?>
                 <p><?php esc_html_e('Create an application password under Users → Profile, then run:', 'wp-review-comments'); ?></p>
@@ -146,6 +168,17 @@ class Admin implements Module
             wp_die('', 403);
         }
         Session::revokeRound((int) ($_POST['round'] ?? 0));
+        wp_safe_redirect(admin_url('admin.php?page='.self::MENU_SLUG));
+        exit;
+    }
+
+    public function saveSettings(): void
+    {
+        check_admin_referer('wprc_save_settings');
+        if (! current_user_can('manage_options')) {
+            wp_die('', 403);
+        }
+        Notifications::saveSettings((string) wp_unslash($_POST['chat_webhook'] ?? ''), ! empty($_POST['email_participants']));
         wp_safe_redirect(admin_url('admin.php?page='.self::MENU_SLUG));
         exit;
     }

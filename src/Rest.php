@@ -3,7 +3,9 @@
 namespace GeneroWP\ReviewComments;
 
 use WP_Error;
+use WP_Post;
 use WP_REST_Request;
+use WP_REST_Response;
 use WP_REST_Server;
 
 /**
@@ -23,9 +25,9 @@ class Rest implements Module
      * Answers depend on the session cookie, so no page or edge cache may keep
      * them (Kinsta caches REST GETs when the site sends public headers).
      */
-    public static function noCache($response, $server, WP_REST_Request $request)
+    public static function noCache(mixed $response, mixed $server, WP_REST_Request $request): mixed
     {
-        if (str_starts_with($request->get_route(), '/'.self::NAMESPACE) && $response instanceof \WP_REST_Response) {
+        if (str_starts_with($request->get_route(), '/'.self::NAMESPACE) && $response instanceof WP_REST_Response) {
             $response->header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0, private');
             $response->header('Vary', 'Cookie');
         }
@@ -35,6 +37,12 @@ class Rest implements Module
 
     public static function routes(): void
     {
+        register_rest_route(self::NAMESPACE, '/boot', [
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => fn () => ['script' => Frontend::scriptUrl()],
+            'permission_callback' => '__return_true',
+        ]);
+
         register_rest_route(self::NAMESPACE, '/session', [
             [
                 'methods' => WP_REST_Server::CREATABLE,
@@ -59,6 +67,12 @@ class Rest implements Module
             'permission_callback' => '__return_true',
         ]);
 
+        register_rest_route(self::NAMESPACE, '/threads', [
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => [self::class, 'listAllThreads'],
+            'permission_callback' => [Session::class, 'canComment'],
+        ]);
+
         register_rest_route(self::NAMESPACE, '/comments', [
             [
                 'methods' => WP_REST_Server::READABLE,
@@ -71,6 +85,27 @@ class Rest implements Module
                 'callback' => [self::class, 'createComment'],
                 'permission_callback' => [Session::class, 'canComment'],
             ],
+        ]);
+
+        register_rest_route(self::NAMESPACE, '/comments/(?P<id>\d+)', [
+            [
+                'methods' => WP_REST_Server::EDITABLE,
+                'callback' => [self::class, 'editComment'],
+                'permission_callback' => [self::class, 'canModifyComment'],
+                'args' => ['text' => ['type' => 'string', 'required' => true]],
+            ],
+            [
+                'methods' => WP_REST_Server::DELETABLE,
+                'callback' => [self::class, 'deleteComment'],
+                'permission_callback' => [self::class, 'canModifyComment'],
+            ],
+        ]);
+
+        register_rest_route(self::NAMESPACE, '/comments/(?P<id>\d+)/screenshot', [
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => [self::class, 'saveScreenshot'],
+            'permission_callback' => [self::class, 'canModifyComment'],
+            'args' => ['image' => ['type' => 'string', 'required' => true]],
         ]);
 
         register_rest_route(self::NAMESPACE, '/comments/(?P<id>\d+)/status', [
@@ -107,6 +142,24 @@ class Rest implements Module
         ];
     }
 
+    /**
+     * Every thread on the site, without replies: what the walkthrough steps
+     * through.
+     */
+    public static function listAllThreads(): array
+    {
+        return array_map(fn (WP_Post $post) => [
+            'id' => $post->ID,
+            'url' => (string) get_post_meta($post->ID, '_wprc_url', true) ?: '/',
+            'page_title' => (string) get_post_meta($post->ID, '_wprc_page_title', true),
+            'status' => (string) get_post_meta($post->ID, '_wprc_status', true) ?: 'open',
+            'device' => Store::device((string) get_post_meta($post->ID, '_wprc_viewport', true)),
+            'created' => get_post_time('c', true, $post),
+            'author' => Store::formatComment($post)['author'],
+            'text' => wp_trim_words($post->post_content, 16, '…'),
+        ], Store::queryThreads(['limit' => 500]));
+    }
+
     public static function listComments(WP_REST_Request $request): array
     {
         $editor = Session::isEditor();
@@ -128,28 +181,65 @@ class Rest implements Module
             $data['author_name'] = $user->display_name;
             $data['author_email'] = $user->user_email;
             $data['author_type'] = 'user';
+            unset($data['guest_key']);
         } else {
             $data['author_name'] = trim((string) ($data['author_name'] ?? ''));
             if ($data['author_name'] === '') {
                 return new WP_Error('wprc_name_required', __('Please enter your name.', 'wp-review-comments'), ['status' => 400]);
             }
             $data['author_type'] = 'guest';
+            $data['guest_key'] = Session::ensureGuestKey();
         }
         $data['round'] = Session::currentRound() ?? 0;
         $data['user_agent'] = $request->get_header('user_agent');
-        if (isset($data['url'])) {
-            $data['url'] = Store::normalizeUrl((string) $data['url']);
-        }
         unset($data['status']);
 
         $id = Store::createComment($data);
         if (is_wp_error($id)) {
             return $id;
         }
-        $post = get_post($id);
-        $root = $post->post_parent ? get_post($post->post_parent) : $post;
 
-        return Store::formatThread($root, Session::isEditor());
+        return self::threadOf($id);
+    }
+
+    public static function canModifyComment(WP_REST_Request $request): bool
+    {
+        $post = get_post((int) $request['id']);
+
+        return $post && $post->post_type === Store::COMMENT && Session::canComment() && Store::canModify($post);
+    }
+
+    public static function editComment(WP_REST_Request $request): array|WP_Error
+    {
+        $id = (int) $request['id'];
+        $result = Store::updateText($id, (string) $request['text']);
+
+        return is_wp_error($result) ? $result : self::threadOf($id);
+    }
+
+    public static function deleteComment(WP_REST_Request $request): array|WP_Error
+    {
+        $id = (int) $request['id'];
+        $post = get_post($id);
+        $rootId = $post->post_parent ?: $id;
+        $result = Store::deleteComment($id);
+        if (is_wp_error($result)) {
+            return $result;
+        }
+        $root = get_post($rootId);
+
+        return ['deleted' => $id, 'thread' => $root ? Store::formatThread($root, Session::isEditor()) : null];
+    }
+
+    public static function saveScreenshot(WP_REST_Request $request): array|WP_Error
+    {
+        $id = (int) $request['id'];
+        if (get_post($id)->post_parent) {
+            return new WP_Error('wprc_not_thread', __('Screenshots belong to threads.', 'wp-review-comments'), ['status' => 400]);
+        }
+        $url = Store::saveScreenshot($id, (string) $request['image']);
+
+        return is_wp_error($url) ? $url : ['screenshot' => $url];
     }
 
     public static function setStatus(WP_REST_Request $request): array|WP_Error
@@ -159,7 +249,15 @@ class Rest implements Module
             return $result;
         }
 
-        return Store::formatThread(get_post((int) $request['id']), true);
+        return self::threadOf((int) $request['id']);
+    }
+
+    private static function threadOf(int $id): array
+    {
+        $post = get_post($id);
+        $root = $post->post_parent ? get_post($post->post_parent) : $post;
+
+        return Store::formatThread($root, Session::isEditor());
     }
 
     /**

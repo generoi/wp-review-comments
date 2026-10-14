@@ -1,0 +1,9 @@
+includes:
+    - vendor/szepeviktor/phpstan-wordpress/extension.neon
+parameters:
+    level: 5
+    paths:
+        - src
+        - wp-review-comments.php
+    scanFiles:
+        - tests/phpstan/stubs.php

@@ -1,10 +1,10 @@
 /**
  * Review Comments overlay.
  *
- * Click "Comment", click anything on the page, write. Every comment stores
- * where it was made (selector, text snippet, block, heading, post ID and
- * viewport) so it can be found again, by people on the page and by Claude
- * through the MCP abilities.
+ * Click "Comment" (or press C), click anything on the page (or hover it and
+ * press Enter), write. Every comment stores where it was made (selector, text
+ * snippet, block, heading, post ID and viewport) plus a screenshot, so it can
+ * be found again by people on the page and by Claude through MCP.
  *
  * All UI lives in a shadow root so the theme's CSS cannot reach it.
  */
@@ -16,6 +16,10 @@
   const STATUS_LABELS = { open: 'Open', in_progress: 'In progress', resolved: 'Resolved', wontfix: "Won't fix" };
   const DONE = ['resolved', 'wontfix'];
   const POLL_MS = 20000;
+  // Keep in sync with Store::IGNORED_PARAMS.
+  const IGNORED_PARAMS = ['review', 'nocache', 'gclid', 'gbraid', 'wbraid', 'fbclid', 'msclkid', 'dclid', 'yclid',
+    'mc_cid', 'mc_eid', '_ga', '_gl', '_hsenc', '_hsmi', 'ref', 'srsltid', 'ver', '_'];
+  const WALK_KEY = 'wprc_walkthrough';
 
   const state = {
     me: null,
@@ -23,9 +27,14 @@
     commenting: false,
     panelOpen: false,
     showDone: false,
+    thisDeviceOnly: false,
     activeId: null,
+    editingId: null,
     drafts: {},
     composer: null,
+    hovered: null,
+    pointer: { x: 0, y: 0 },
+    walk: null,
   };
 
   // --- helpers -------------------------------------------------------------
@@ -33,6 +42,11 @@
   const store = {
     get(key) { try { return localStorage.getItem('wprc_' + key) || ''; } catch (e) { return ''; } },
     set(key, value) { try { localStorage.setItem('wprc_' + key, value); } catch (e) { /* private mode */ } },
+  };
+
+  const session = {
+    get(key) { try { return JSON.parse(sessionStorage.getItem(key) || 'null'); } catch (e) { return null; } },
+    set(key, value) { try { value == null ? sessionStorage.removeItem(key) : sessionStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* blocked */ } },
   };
 
   async function api(path, options = {}) {
@@ -46,11 +60,22 @@
     return data;
   }
 
-  function pageUrl() {
-    const params = new URLSearchParams(location.search);
-    params.delete('review');
+  /** Same key as Store::normalizeUrl(). */
+  function normalizeUrl(href) {
+    const url = new URL(href, location.origin);
+    const params = new URLSearchParams();
+    [...url.searchParams.keys()].sort().forEach((key) => {
+      if (!IGNORED_PARAMS.includes(key) && !key.startsWith('utm_')) params.set(key, url.searchParams.get(key));
+    });
+    const path = url.pathname.replace(/\/+$/, '') || '/';
     const query = params.toString();
-    return location.pathname + (query ? '?' + query : '');
+    return path + (query ? '?' + query : '');
+  }
+  const pageUrl = () => normalizeUrl(location.href);
+
+  function device(width = window.innerWidth) {
+    if (!width) return '';
+    return width < 600 ? 'mobile' : width < 1024 ? 'tablet' : 'desktop';
   }
 
   function h(tag, props = {}, ...children) {
@@ -76,6 +101,11 @@
     if (seconds < 86400) return Math.floor(seconds / 3600) + ' h ago';
     return new Date(iso).toLocaleDateString();
   }
+
+  const isTyping = (event) => {
+    const el = event.composedPath()[0];
+    return el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+  };
 
   // --- describing an element -----------------------------------------------
 
@@ -161,11 +191,14 @@
   root.append(h('style', {}, CSS_TEXT()));
   const pinLayer = h('div', { class: 'pins' });
   const highlight = h('div', { class: 'highlight', hidden: true });
+  const hint = h('div', { class: 'hint', hidden: true },
+    'Click what you want to comment on, or hover it and press Enter. Esc cancels.');
+  const walkBar = h('div', { class: 'walkbar', hidden: true });
   const toolbar = h('div', { class: 'toolbar' });
   const panel = h('aside', { class: 'panel', hidden: true });
   const composerEl = h('div', { class: 'composer', hidden: true });
   const toast = h('div', { class: 'toast', hidden: true });
-  root.append(pinLayer, highlight, toolbar, panel, composerEl, toast);
+  root.append(pinLayer, highlight, hint, walkBar, toolbar, panel, composerEl, toast);
 
   function showToast(message) {
     toast.textContent = message;
@@ -174,22 +207,36 @@
     showToast.timer = setTimeout(() => { toast.hidden = true; }, 5000);
   }
 
+  /** Threads shown with the current filters. */
+  function shown(thread) {
+    if (thread.id === state.activeId) return true;
+    if (!state.showDone && DONE.includes(thread.status)) return false;
+    if (state.thisDeviceOnly && thread.device && thread.device !== device()) return false;
+    return true;
+  }
+
   function renderToolbar() {
     const open = state.threads.filter((t) => !DONE.includes(t.status)).length;
     toolbar.replaceChildren(
       h('button', {
         class: 'primary' + (state.commenting ? ' active' : ''),
-        title: 'Click anything on the page to comment on it (Esc to cancel)',
+        title: 'Comment on part of the page (shortcut: C)',
         onclick: () => setCommenting(!state.commenting),
       }, state.commenting ? 'Cancel' : '+ Comment'),
-      h('button', { onclick: () => togglePanel() }, 'Threads', h('span', { class: 'count' }, String(open))),
+      h('button', { title: 'Comments on this page', onclick: () => togglePanel() }, 'Threads', h('span', { class: 'count' }, String(open))),
     );
   }
 
   function setCommenting(on) {
     state.commenting = on;
     document.documentElement.classList.toggle('wprc-commenting', on);
-    if (!on) highlight.hidden = true;
+    hint.hidden = !on;
+    if (on) {
+      closeComposer();
+      if (state.hovered) placeHighlight(state.hovered);
+    } else {
+      highlight.hidden = true;
+    }
     renderToolbar();
   }
 
@@ -204,11 +251,11 @@
   }
 
   function renderPins() {
-    const items = numbered().filter((t) => state.showDone || !DONE.includes(t.status) || t.id === state.activeId);
+    const items = numbered().filter(shown);
     pinLayer.replaceChildren(...items.map((thread) => {
       const pin = h('button', {
-        class: 'pin status-' + thread.status + (thread.id === state.activeId ? ' active' : ''),
-        title: thread.author + ': ' + thread.text.slice(0, 80),
+        class: 'pin status-' + thread.status + (thread.id === state.activeId ? ' active' : '') + (thread.device && thread.device !== device() ? ' other-device' : ''),
+        title: thread.author + (thread.device ? ' (' + thread.device + ')' : '') + ': ' + thread.text.slice(0, 80),
         onclick: () => focusThread(thread.id),
       }, String(thread.n));
       pin.dataset.id = thread.id;
@@ -227,7 +274,7 @@
       pin.style.left = rect.left + rect.width * (thread.offset_x || 0) + 'px';
       pin.style.top = rect.top + rect.height * (thread.offset_y || 0) + 'px';
     }
-    if (state.activeId && !highlight.hidden && !state.commenting) {
+    if (state.activeId && !highlight.hidden && !state.commenting && !state.composer) {
       const thread = state.threads.find((t) => t.id === state.activeId);
       const el = thread && findElementCached(thread);
       if (el) placeHighlight(el);
@@ -249,24 +296,64 @@
     highlight.hidden = false;
   }
 
+  function whoAmI() {
+    return state.me.name || store.get('name') || 'Guest reviewer';
+  }
+
   function renderPanel() {
     if (!state.panelOpen) return;
     // Do not wipe what someone is typing; the next poll catches up.
     if (root.activeElement && panel.contains(root.activeElement) && root.activeElement.tagName === 'TEXTAREA') return;
 
-    const items = numbered().filter((t) => state.showDone || !DONE.includes(t.status)).reverse();
+    const items = numbered().filter(shown).reverse();
+    const hidden = state.threads.length - items.length;
     panel.replaceChildren(
       h('header', {},
         h('strong', {}, 'Review comments'),
-        h('label', { class: 'toggle' },
-          h('input', { type: 'checkbox', checked: state.showDone, onchange: (e) => { state.showDone = e.target.checked; renderPins(); renderPanel(); } }),
-          ' Show resolved'),
+        h('button', { class: 'walk', title: 'Step through every open comment on the site', onclick: startWalkthrough }, 'Walkthrough'),
         h('button', { class: 'close', title: 'Close', onclick: () => togglePanel(false) }, '×'),
       ),
-      h('p', { class: 'who' }, state.me.name ? 'Commenting as ' + state.me.name : (store.get('name') ? 'Commenting as ' + store.get('name') : 'Guest reviewer'),
-        state.me.round ? ' · ' + state.me.round : ''),
-      items.length ? h('div', { class: 'threads' }, items.map(renderThread)) : h('p', { class: 'empty' }, 'No comments on this page yet. Click “+ Comment” and then the part of the page you want to comment on.'),
+      h('div', { class: 'filters' },
+        h('label', {}, h('input', { type: 'checkbox', checked: state.showDone, onchange: (e) => { state.showDone = e.target.checked; render(); } }), ' Show resolved'),
+        h('label', {}, h('input', { type: 'checkbox', checked: state.thisDeviceOnly, onchange: (e) => { state.thisDeviceOnly = e.target.checked; render(); } }), ' Only ' + device()),
+      ),
+      h('p', { class: 'who' }, 'Commenting as ' + whoAmI(), state.me.round ? ' · ' + state.me.round : ''),
+      items.length
+        ? h('div', { class: 'threads' }, items.map(renderThread), hidden ? h('p', { class: 'more' }, hidden + ' hidden by filters') : null)
+        : h('p', { class: 'empty' }, hidden
+          ? hidden + ' comment' + (hidden === 1 ? ' is' : 's are') + ' hidden by the filters above.'
+          : 'No comments on this page yet. Click “+ Comment” (or press C) and then the part of the page you want to comment on.'),
     );
+  }
+
+  function renderBody(comment) {
+    if (comment.deleted) return h('p', { class: 'text deleted' }, 'Comment deleted');
+    if (state.editingId === comment.id) {
+      return h('form', { class: 'edit-form', onsubmit: (e) => { e.preventDefault(); saveEdit(comment.id, e.target); } },
+        h('textarea', { rows: 3, value: comment.text, onkeydown: (e) => {
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) e.target.form.requestSubmit();
+          if (e.key === 'Escape') { e.stopPropagation(); state.editingId = null; e.target.blur(); renderPanel(); }
+        } }),
+        h('div', { class: 'actions' },
+          h('button', { type: 'button', onclick: () => { state.editingId = null; renderPanel(); } }, 'Cancel'),
+          h('button', { type: 'submit', class: 'primary' }, 'Save'),
+        ),
+      );
+    }
+    return h('p', { class: 'text' }, comment.text, comment.edited ? h('span', { class: 'edited' }, ' (edited)') : null);
+  }
+
+  function ownActions(comment) {
+    if (!comment.can_modify || comment.deleted || state.editingId === comment.id) return null;
+    return h('span', { class: 'own' },
+      h('button', { class: 'link', onclick: (e) => { e.stopPropagation(); state.editingId = comment.id; renderPanel(); focusEditor(); } }, 'Edit'),
+      h('button', { class: 'link danger', onclick: (e) => { e.stopPropagation(); removeComment(comment.id); } }, 'Delete'),
+    );
+  }
+
+  function focusEditor() {
+    const textarea = panel.querySelector('.edit-form textarea');
+    if (textarea) { textarea.focus(); textarea.setSelectionRange(textarea.value.length, textarea.value.length); }
   }
 
   function renderThread(thread) {
@@ -276,16 +363,20 @@
         h('span', { class: 'num status-' + thread.status }, String(thread.n)),
         h('strong', {}, thread.author),
         h('span', { class: 'time' }, timeAgo(thread.created)),
+        thread.device ? h('span', { class: 'device' + (thread.device !== device() ? ' other' : ''), title: 'Written at ' + thread.viewport }, thread.device) : null,
         state.me.is_editor
-          ? h('select', { class: 'status', onclick: (e) => e.stopPropagation(), onchange: (e) => setStatus(thread.id, e.target.value) },
+          ? h('select', { class: 'status', title: 'Status', onclick: (e) => e.stopPropagation(), onchange: (e) => setStatus(thread.id, e.target.value) },
             Object.entries(STATUS_LABELS).map(([value, label]) => h('option', { value, selected: value === thread.status }, label)))
           : h('span', { class: 'badge status-' + thread.status }, STATUS_LABELS[thread.status]),
       ),
-      h('p', { class: 'text' }, thread.text),
-      found ? null : h('p', { class: 'detached' }, 'Element not found on this screen size. It was: “' + thread.snippet + '”'),
+      renderBody(thread),
+      ownActions(thread),
+      thread.screenshot ? h('a', { class: 'shot', href: thread.screenshot, target: '_blank', rel: 'noopener', title: 'What the reviewer saw' },
+        h('img', { src: thread.screenshot, alt: 'Screenshot when the comment was written', loading: 'lazy' })) : null,
+      found ? null : h('p', { class: 'detached' }, 'Not visible at this screen size' + (thread.device ? ' (written on ' + thread.device + ')' : '') + '. It was: “' + thread.snippet + '”'),
       thread.replies.map((reply) => h('div', { class: 'reply' + (reply.author_type === 'ai' ? ' ai' : '') },
-        h('div', { class: 'meta' }, h('strong', {}, reply.author), h('span', { class: 'time' }, timeAgo(reply.created))),
-        h('p', { class: 'text' }, reply.text),
+        h('div', { class: 'meta' }, h('strong', {}, reply.author), h('span', { class: 'time' }, timeAgo(reply.created)), ownActions(reply)),
+        renderBody(reply),
       )),
       h('form', { class: 'reply-form', onsubmit: (e) => { e.preventDefault(); sendReply(thread.id, e.target); } },
         h('textarea', {
@@ -298,26 +389,29 @@
     );
   }
 
-  function focusThread(id) {
+  function focusThread(id, { scroll = true } = {}) {
     state.activeId = id;
     const thread = state.threads.find((t) => t.id === id);
     togglePanel(true);
     renderPins();
     const el = thread && findElementCached(thread);
     if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      if (scroll) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       placeHighlight(el);
       setTimeout(positionPins, 600);
     } else {
       highlight.hidden = true;
     }
+    const card = panel.querySelector('.thread.active');
+    if (card) card.scrollIntoView({ block: 'nearest' });
     if (history.replaceState) history.replaceState(null, '', '#wprc-' + id);
   }
 
   // --- composing -----------------------------------------------------------
 
-  function openComposer(el, event) {
+  function openComposer(el, point) {
     const rect = el.getBoundingClientRect();
+    const inside = point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
     state.composer = {
       url: pageUrl(),
       page_title: document.title,
@@ -326,8 +420,8 @@
       snippet: snippetFor(el),
       heading: headingFor(el),
       block: blockFor(el),
-      offset_x: rect.width ? (event.clientX - rect.left) / rect.width : 0,
-      offset_y: rect.height ? (event.clientY - rect.top) / rect.height : 0,
+      offset_x: inside && rect.width ? (point.x - rect.left) / rect.width : 0.5,
+      offset_y: inside && rect.height ? (point.y - rect.top) / rect.height : 0.5,
       viewport: window.innerWidth + 'x' + window.innerHeight,
     };
     setCommenting(false);
@@ -335,12 +429,14 @@
 
     // Guests type their name once; after that it is remembered in this browser.
     const askName = !state.me.name && !store.get('name');
+    const noAutofill = { autocomplete: 'off', 'data-1p-ignore': '', 'data-lpignore': 'true', 'data-form-type': 'other' };
     const nameFields = h('div', { class: 'row', hidden: !askName },
-      h('input', { name: 'author_name', required: askName, placeholder: 'Your name', value: store.get('name'), autocomplete: 'off', 'data-1p-ignore': '', 'data-lpignore': 'true', 'data-form-type': 'other' }),
-      h('input', { name: 'author_email', type: 'email', placeholder: 'Email (optional)', value: store.get('email'), autocomplete: 'off', 'data-1p-ignore': '', 'data-lpignore': 'true', 'data-form-type': 'other' }),
+      h('input', { name: 'author_name', required: askName, placeholder: 'Your name', value: store.get('name'), ...noAutofill }),
+      h('input', { name: 'author_email', type: 'email', placeholder: 'Email (optional)', value: store.get('email'), ...noAutofill }),
     );
     const asWho = !state.me.name && !askName ? h('p', { class: 'as' }, 'Commenting as ' + store.get('name') + ' · ',
       h('button', { type: 'button', class: 'link', onclick: (e) => { nameFields.hidden = false; nameFields.querySelector('input').required = true; e.target.parentNode.remove(); } }, 'change')) : null;
+
     composerEl.replaceChildren(h('form', { onsubmit: (e) => { e.preventDefault(); submitComposer(e.target); } },
       h('p', { class: 'target' }, 'On: “' + state.composer.snippet.slice(0, 70) + '”'),
       h('textarea', { name: 'text', rows: 4, required: true, placeholder: 'What should change here?',
@@ -355,8 +451,16 @@
     composerEl.hidden = false;
     const width = Math.min(340, window.innerWidth - 24);
     composerEl.style.width = width + 'px';
-    composerEl.style.left = Math.max(12, Math.min(event.clientX, window.innerWidth - width - 12)) + 'px';
-    composerEl.style.top = Math.max(12, Math.min(event.clientY + 12, window.innerHeight - 260)) + 'px';
+    if (window.innerWidth < 600) {
+      // Phones: dock to the bottom, above the toolbar, so the keyboard does not hide it.
+      Object.assign(composerEl.style, { left: '12px', top: 'auto', bottom: '64px' });
+    } else {
+      Object.assign(composerEl.style, {
+        left: Math.max(12, Math.min(point.x, window.innerWidth - width - 12)) + 'px',
+        top: Math.max(12, Math.min(point.y + 12, window.innerHeight - 280)) + 'px',
+        bottom: 'auto',
+      });
+    }
     composerEl.querySelector('textarea').focus();
   }
 
@@ -367,24 +471,27 @@
   }
 
   function guestFields(form) {
+    if (state.me.name) return {};
     const name = form.author_name ? form.author_name.value.trim() : store.get('name');
     const email = form.author_email ? form.author_email.value.trim() : store.get('email');
     if (name) store.set('name', name);
     if (form.author_email) store.set('email', email);
-    return state.me.name ? {} : { author_name: name, author_email: email };
+    return { author_name: name, author_email: email };
   }
 
   async function submitComposer(form) {
     const button = form.querySelector('button[type=submit]');
     button.disabled = true;
+    const where = state.composer;
     try {
       const thread = await api('/comments', {
         method: 'POST',
-        body: JSON.stringify({ ...state.composer, ...guestFields(form), text: form.text.value }),
+        body: JSON.stringify({ ...where, ...guestFields(form), text: form.text.value }),
       });
       upsert(thread);
       closeComposer();
-      focusThread(thread.id);
+      focusThread(thread.id, { scroll: false });
+      captureScreenshot(thread.id);
     } catch (error) {
       showToast(error.message);
       button.disabled = false;
@@ -392,7 +499,8 @@
   }
 
   async function sendReply(id, form) {
-    const text = form.querySelector('textarea').value.trim();
+    const textarea = form.querySelector('textarea');
+    const text = textarea.value.trim();
     if (!text) return;
     if (!state.me.name && !store.get('name')) {
       const name = window.prompt('Your name');
@@ -405,8 +513,35 @@
         body: JSON.stringify({ parent: id, text, ...(state.me.name ? {} : { author_name: store.get('name'), author_email: store.get('email') }) }),
       });
       delete state.drafts[id];
+      textarea.value = '';
+      textarea.blur();
+      upsert(thread);
+    } catch (error) {
+      showToast(error.message);
+    }
+  }
+
+  async function saveEdit(id, form) {
+    try {
+      const thread = await api('/comments/' + id, { method: 'PUT', body: JSON.stringify({ text: form.querySelector('textarea').value }) });
+      state.editingId = null;
       form.querySelector('textarea').blur();
       upsert(thread);
+    } catch (error) {
+      showToast(error.message);
+    }
+  }
+
+  async function removeComment(id) {
+    if (!window.confirm('Delete this comment?')) return;
+    try {
+      const result = await api('/comments/' + id, { method: 'DELETE' });
+      if (result.thread) upsert(result.thread);
+      else {
+        state.threads = state.threads.filter((t) => t.id !== id);
+        if (state.activeId === id) { state.activeId = null; highlight.hidden = true; }
+        render();
+      }
     } catch (error) {
       showToast(error.message);
     }
@@ -433,6 +568,118 @@
     renderPanel();
   }
 
+  // --- screenshots ---------------------------------------------------------
+
+  let libraryPromise = null;
+  function loadScreenshotLibrary() {
+    if (window.html2canvas) return Promise.resolve(window.html2canvas);
+    libraryPromise ||= new Promise((resolve, reject) => {
+      const script = h('script', { src: C.screenshotLibrary, async: true });
+      script.onload = () => (window.html2canvas ? resolve(window.html2canvas) : reject(new Error('Screenshot library missing')));
+      script.onerror = () => reject(new Error('Screenshot library failed to load'));
+      document.head.append(script);
+    });
+    return libraryPromise;
+  }
+
+  /**
+   * Picture of the visible part of the page, sent after the comment is saved
+   * so a slow or failing capture never loses the comment itself.
+   */
+  async function captureScreenshot(id) {
+    if (!C.screenshotLibrary) return;
+    try {
+      const html2canvas = await loadScreenshotLibrary();
+      const scale = Math.min(1, 1440 / window.innerWidth);
+      const canvas = await html2canvas(document.documentElement, {
+        x: window.scrollX,
+        y: window.scrollY,
+        width: window.innerWidth,
+        height: window.innerHeight,
+        windowWidth: document.documentElement.clientWidth,
+        windowHeight: window.innerHeight,
+        scale,
+        useCORS: true,
+        logging: false,
+        backgroundColor: '#ffffff',
+        ignoreElements: (el) => el === host,
+      });
+      // Mark where the comment is, like the pin on the page.
+      const thread = state.threads.find((t) => t.id === id);
+      const el = thread && findElementCached(thread);
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        const ctx = canvas.getContext('2d');
+        ctx.strokeStyle = '#4f46e5';
+        ctx.lineWidth = 3 * scale;
+        ctx.strokeRect(rect.left * scale, rect.top * scale, rect.width * scale, rect.height * scale);
+      }
+      const image = canvas.toDataURL('image/jpeg', 0.72);
+      const result = await api('/comments/' + id + '/screenshot', { method: 'POST', body: JSON.stringify({ image }) });
+      const target = state.threads.find((t) => t.id === id);
+      if (target) { target.screenshot = result.screenshot; renderPanel(); }
+    } catch (error) {
+      console.warn('[wprc] screenshot', error);
+    }
+  }
+
+  // --- walkthrough ---------------------------------------------------------
+
+  async function startWalkthrough() {
+    try {
+      const all = await api('/threads');
+      const items = all
+        .filter((t) => state.showDone || !DONE.includes(t.status))
+        .sort((a, b) => a.url.localeCompare(b.url) || a.created.localeCompare(b.created))
+        .map((t) => ({ id: t.id, url: t.url, title: t.page_title }));
+      if (!items.length) { showToast('No open comments to walk through.'); return; }
+      const here = items.findIndex((t) => t.url === pageUrl());
+      state.walk = { items, index: Math.max(0, here) };
+      session.set(WALK_KEY, state.walk);
+      goToWalkItem();
+    } catch (error) {
+      showToast(error.message);
+    }
+  }
+
+  function goToWalkItem() {
+    const item = state.walk.items[state.walk.index];
+    session.set(WALK_KEY, state.walk);
+    if (item.url !== pageUrl()) {
+      location.href = item.url + '#wprc-' + item.id;
+      return;
+    }
+    renderWalkBar();
+    if (state.threads.some((t) => t.id === item.id)) focusThread(item.id);
+    else showToast('That comment no longer exists.');
+  }
+
+  function stepWalk(delta) {
+    const next = state.walk.index + delta;
+    if (next < 0 || next >= state.walk.items.length) return;
+    state.walk.index = next;
+    goToWalkItem();
+  }
+
+  function stopWalkthrough() {
+    state.walk = null;
+    session.set(WALK_KEY, null);
+    walkBar.hidden = true;
+  }
+
+  function renderWalkBar() {
+    if (!state.walk) { walkBar.hidden = true; return; }
+    const { items, index } = state.walk;
+    walkBar.replaceChildren(
+      h('button', { title: 'Previous (←)', disabled: index === 0, onclick: () => stepWalk(-1) }, '‹'),
+      h('span', { class: 'pos' }, 'Comment ' + (index + 1) + ' of ' + items.length),
+      h('span', { class: 'page' }, items[index].title || items[index].url),
+      h('button', { title: 'Next (→)', disabled: index === items.length - 1, onclick: () => stepWalk(1) }, '›'),
+      h('button', { class: 'end', title: 'End walkthrough', onclick: stopWalkthrough }, 'Done'),
+    );
+    walkBar.hidden = false;
+  }
+
   // --- page events ---------------------------------------------------------
 
   function pageTarget(event) {
@@ -441,9 +688,10 @@
   }
 
   document.addEventListener('mousemove', (event) => {
-    if (!state.commenting) return;
+    state.pointer = { x: event.clientX, y: event.clientY };
     const el = pageTarget(event);
-    if (el) placeHighlight(el);
+    if (el) state.hovered = el;
+    if (state.commenting && el) placeHighlight(el);
   }, true);
 
   // Capture phase, so links and buttons do not act while picking a spot.
@@ -454,21 +702,44 @@
       event.stopPropagation();
       if (type === 'click') {
         const el = pageTarget(event);
-        if (el) openComposer(el, event);
+        if (el) openComposer(el, { x: event.clientX, y: event.clientY });
       }
     }, true);
   }
 
+  // Capture phase too: Enter must not activate the hovered link.
   document.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape') return;
-    if (state.commenting) setCommenting(false);
-    else if (state.composer) closeComposer();
-  });
+    if (event.key === 'Escape') {
+      if (state.commenting) setCommenting(false);
+      else if (state.composer) closeComposer();
+      return;
+    }
+    if (isTyping(event) || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (state.commenting && event.key === 'Enter' && state.hovered) {
+      event.preventDefault();
+      event.stopPropagation();
+      openComposer(state.hovered, state.pointer);
+    } else if (event.key === 'c' || event.key === 'C') {
+      // Opening a dropdown first and then pressing C keeps it open, unlike
+      // clicking the button, which counts as a click outside the menu.
+      event.preventDefault();
+      setCommenting(!state.commenting);
+    } else if (state.walk && event.key === 'ArrowRight') {
+      stepWalk(1);
+    } else if (state.walk && event.key === 'ArrowLeft') {
+      stepWalk(-1);
+    }
+  }, true);
 
   let frame = 0;
   const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(positionPins); };
   window.addEventListener('scroll', schedule, { passive: true, capture: true });
-  window.addEventListener('resize', () => { elementCache.clear(); schedule(); });
+  let lastDevice = device();
+  window.addEventListener('resize', () => {
+    elementCache.clear();
+    schedule();
+    if (device() !== lastDevice) { lastDevice = device(); render(); }
+  });
 
   window.addEventListener('hashchange', () => {
     const match = location.hash.match(/^#wprc-(\d+)$/);
@@ -482,6 +753,8 @@
     elementCache.clear();
     render();
   }
+
+  const canRefresh = () => document.visibilityState === 'visible' && !state.composer && state.editingId === null;
 
   async function boot() {
     const params = new URLSearchParams(location.search);
@@ -507,12 +780,20 @@
     renderToolbar();
     await load();
 
+    state.walk = session.get(WALK_KEY);
     const match = location.hash.match(/^#wprc-(\d+)$/);
-    if (match) setTimeout(() => focusThread(Number(match[1])), 300);
-    else if (token) togglePanel(true);
+    if (state.walk) {
+      renderWalkBar();
+      const item = state.walk.items[state.walk.index];
+      if (item && item.url === pageUrl()) setTimeout(() => focusThread(item.id), 300);
+    } else if (match) {
+      setTimeout(() => focusThread(Number(match[1])), 300);
+    } else if (token) {
+      togglePanel(true);
+    }
 
-    setInterval(() => { if (document.visibilityState === 'visible' && !state.composer) load().catch(() => {}); }, POLL_MS);
-    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !state.composer) load().catch(() => {}); });
+    setInterval(() => { if (canRefresh()) load().catch(() => {}); }, POLL_MS);
+    document.addEventListener('visibilitychange', () => { if (canRefresh()) load().catch(() => {}); });
     // Late layout shifts (fonts, images, sliders) move elements after load.
     window.addEventListener('load', () => { elementCache.clear(); positionPins(); });
   }
@@ -530,49 +811,72 @@
       .toolbar button.primary { background: #4f46e5; border-color: #4f46e5; color: #fff; }
       .toolbar button.active { background: #18181b; border-color: #18181b; }
       .count { min-width: 20px; padding: 1px 6px; border-radius: 999px; background: #4f46e5; color: #fff; font-size: 12px; }
+      .hint { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); background: #18181b; color: #fff; padding: 8px 14px; border-radius: 8px; font-size: 13px; max-width: calc(100vw - 24px); text-align: center; pointer-events: none; }
       .highlight { position: fixed; pointer-events: none; outline: 2px solid #4f46e5; outline-offset: 2px; background: rgba(79,70,229,.08); border-radius: 2px; transition: all .08s; }
       .pin { position: fixed; width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: 50% 50% 50% 0; border: 2px solid #fff; background: #4f46e5; color: #fff; font-size: 12px; font-weight: 700; box-shadow: 0 2px 8px rgba(0,0,0,.3); padding: 0; }
       .pin.active { transform: scale(1.25); background: #18181b; }
+      .pin.other-device { opacity: .55; border-style: dashed; }
       .status-in_progress { background: #d97706 !important; }
       .status-resolved { background: #16a34a !important; }
       .status-wontfix { background: #71717a !important; }
       .panel { position: fixed; top: 0; right: 0; bottom: 0; width: 380px; max-width: 100vw; background: #fff; color: #18181b; box-shadow: -8px 0 32px rgba(0,0,0,.18); display: flex; flex-direction: column; font-size: 14px; }
-      .panel header { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid #e4e4e7; }
+      .panel header { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid #e4e4e7; }
       .panel header strong { flex: 1; font-size: 15px; }
-      .toggle { font-size: 13px; color: #52525b; display: flex; align-items: center; gap: 4px; }
+      .walk { padding: 4px 10px; border-radius: 999px; border: 1px solid #c7d2fe; background: #eef2ff; color: #3730a3; font-size: 12px; font-weight: 600; }
+      .filters { display: flex; gap: 14px; padding: 8px 16px; border-bottom: 1px solid #f4f4f5; font-size: 13px; color: #52525b; }
+      .filters label { display: flex; align-items: center; gap: 4px; }
       .close { border: 0; background: none; font-size: 22px; line-height: 1; color: #52525b; }
       .who { margin: 0; padding: 8px 16px; color: #71717a; font-size: 12px; border-bottom: 1px solid #f4f4f5; }
       .threads { overflow-y: auto; flex: 1; padding: 8px 0 80px; }
-      .empty { padding: 16px; color: #52525b; }
+      .empty, .more { padding: 16px; color: #52525b; margin: 0; }
+      .more { font-size: 12px; }
       .thread { padding: 12px 16px; border-bottom: 1px solid #f4f4f5; }
       .thread.active { background: #eef2ff; }
       .meta { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; }
       .meta .time { color: #71717a; flex: 1; }
       .num { display: inline-grid; place-items: center; min-width: 22px; height: 22px; border-radius: 50%; background: #4f46e5; color: #fff; font-size: 11px; font-weight: 700; }
       .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; color: #fff; background: #4f46e5; }
+      .device { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: #f4f4f5; color: #52525b; }
+      .device.other { background: #fef3c7; color: #92400e; }
       select.status { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid #d4d4d8; border-radius: 6px; background: #fff; color: #18181b; }
       .text { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
+      .text.deleted { color: #a1a1aa; font-style: italic; }
+      .edited { color: #a1a1aa; font-size: 12px; }
+      .own { display: inline-flex; gap: 10px; margin-top: 4px; }
+      .meta .own { margin: 0 0 0 auto; }
+      .shot { display: block; margin-top: 8px; }
+      .shot img { display: block; width: 100%; max-height: 160px; object-fit: cover; object-position: top; border-radius: 6px; border: 1px solid #e4e4e7; }
       .detached { margin: 6px 0 0; font-size: 12px; color: #b45309; }
       .reply { margin: 10px 0 0 14px; padding-left: 10px; border-left: 2px solid #e4e4e7; }
       .reply.ai { border-left-color: #a78bfa; }
       .reply .meta { cursor: default; }
       .reply-form { display: flex; gap: 6px; margin-top: 10px; }
-      textarea, input { font: inherit; font-size: 14px; width: 100%; padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 8px; color: #18181b; background: #fff; resize: vertical; }
+      .edit-form { display: grid; gap: 6px; margin-top: 6px; }
+      textarea, input[type=text], input:not([type]), input[type=email] { font: inherit; font-size: 16px; width: 100%; padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 8px; color: #18181b; background: #fff; resize: vertical; }
       textarea:focus, input:focus { outline: 2px solid #4f46e5; outline-offset: -1px; border-color: transparent; }
       .reply-form button, .actions button { padding: 6px 12px; border-radius: 8px; border: 1px solid #d4d4d8; background: #fff; color: #18181b; font-size: 13px; font-weight: 600; }
       .actions button.primary { background: #4f46e5; border-color: #4f46e5; color: #fff; }
+      .link { border: 0; background: none; padding: 0; color: #4f46e5; font-size: 12px; text-decoration: underline; }
+      .link.danger { color: #b91c1c; }
       .composer { position: fixed; background: #fff; color: #18181b; padding: 12px; border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); font-size: 14px; }
       .composer form { display: grid; gap: 8px; }
       .target { margin: 0; font-size: 12px; color: #71717a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .as { margin: 0; font-size: 12px; color: #71717a; }
-      .link { border: 0; background: none; padding: 0; color: #4f46e5; font-size: 12px; text-decoration: underline; }
       .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
       .actions { display: flex; justify-content: flex-end; gap: 6px; }
+      .walkbar { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 6px; background: #18181b; color: #fff; border-radius: 999px; font-size: 13px; box-shadow: 0 6px 24px rgba(0,0,0,.25); max-width: calc(100vw - 24px); }
+      .walkbar button { border: 0; background: #3f3f46; color: #fff; border-radius: 999px; min-width: 30px; height: 30px; font-size: 18px; line-height: 1; }
+      .walkbar button:disabled { opacity: .35; cursor: default; }
+      .walkbar .end { font-size: 13px; padding: 0 12px; background: #4f46e5; }
+      .walkbar .pos { font-weight: 600; white-space: nowrap; }
+      .walkbar .page { color: #a1a1aa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
       .toast { position: fixed; left: 50%; bottom: 72px; transform: translateX(-50%); background: #18181b; color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 14px; max-width: calc(100vw - 32px); }
       @media (max-width: 600px) {
         .panel { top: auto; height: 70vh; width: 100vw; border-radius: 14px 14px 0 0; }
         .toolbar { right: 12px; bottom: 12px; }
         .row { grid-template-columns: 1fr; }
+        .walkbar .page { display: none; }
+        .hint { top: auto; bottom: 64px; }
       }
     `;
   }

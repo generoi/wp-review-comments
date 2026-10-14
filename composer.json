@@ -14,7 +14,11 @@
         "php": ">=8.1"
     },
     "require-dev": {
-        "laravel/pint": "^1.17"
+        "laravel/pint": "^1.17",
+        "phpstan/phpstan": "^2",
+        "phpunit/phpunit": "^11",
+        "szepeviktor/phpstan-wordpress": "^2",
+        "wordpress/mcp-adapter": "^0.7"
     },
     "suggest": {
         "wordpress/mcp-adapter": "Exposes the review abilities to Claude and other MCP clients"
@@ -26,9 +30,19 @@
     },
     "scripts": {
         "lint": "pint --test",
-        "lint:fix": "pint"
+        "lint:fix": "pint",
+        "stan": "phpstan analyse --memory-limit=1G",
+        "test": "phpunit"
     },
     "config": {
-        "sort-packages": true
+        "sort-packages": true,
+        "allow-plugins": {
+            "automattic/jetpack-autoloader": false
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "GeneroWP\\ReviewComments\\Tests\\": "tests/"
+        }
     }
 }
