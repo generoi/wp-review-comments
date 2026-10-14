@@ -199,6 +199,11 @@
   const composerEl = h('div', { class: 'composer', hidden: true });
   const toast = h('div', { class: 'toast', hidden: true });
   root.append(pinLayer, highlight, hint, walkBar, toolbar, panel, composerEl, toast);
+  // Clicks in the overlay must not reach the page: menus and modals close on
+  // "click outside", which would hide the element being commented on.
+  for (const type of ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'focusin', 'keydown', 'keyup']) {
+    host.addEventListener(type, (event) => event.stopPropagation());
+  }
 
   function showToast(message) {
     toast.textContent = message;
@@ -357,7 +362,10 @@
   }
 
   function renderThread(thread) {
-    const found = !!findElementCached(thread);
+    const el = findElementCached(thread);
+    const where = !el
+      ? 'Not found at this screen size' + (thread.device ? ' (written on ' + thread.device + ')' : '')
+      : !visible(el) ? 'Hidden right now: it may be in a menu, tab or slide that is closed' : '';
     return h('article', { class: 'thread' + (thread.id === state.activeId ? ' active' : '') },
       h('div', { class: 'meta', onclick: () => focusThread(thread.id) },
         h('span', { class: 'num status-' + thread.status }, String(thread.n)),
@@ -373,7 +381,7 @@
       ownActions(thread),
       thread.screenshot ? h('a', { class: 'shot', href: thread.screenshot, target: '_blank', rel: 'noopener', title: 'What the reviewer saw' },
         h('img', { src: thread.screenshot, alt: 'Screenshot when the comment was written', loading: 'lazy' })) : null,
-      found ? null : h('p', { class: 'detached' }, 'Not visible at this screen size' + (thread.device ? ' (written on ' + thread.device + ')' : '') + '. It was: “' + thread.snippet + '”'),
+      where ? h('p', { class: 'detached' }, where + '. It was: “' + thread.snippet + '”') : null,
       thread.replies.map((reply) => h('div', { class: 'reply' + (reply.author_type === 'ai' ? ' ai' : '') },
         h('div', { class: 'meta' }, h('strong', {}, reply.author), h('span', { class: 'time' }, timeAgo(reply.created)), ownActions(reply)),
         renderBody(reply),
@@ -424,6 +432,10 @@
       offset_y: inside && rect.height ? (point.y - rect.top) / rect.height : 0.5,
       viewport: window.innerWidth + 'x' + window.innerHeight,
     };
+    // Picture the page now, while menus or slides are still as the reviewer
+    // sees them; it is uploaded once the comment is saved.
+    state.composer.shot = takeScreenshot(el);
+    state.composer.shot.catch(() => {});
     setCommenting(false);
     placeHighlight(el);
 
@@ -482,7 +494,7 @@
   async function submitComposer(form) {
     const button = form.querySelector('button[type=submit]');
     button.disabled = true;
-    const where = state.composer;
+    const { shot, ...where } = state.composer;
     try {
       const thread = await api('/comments', {
         method: 'POST',
@@ -491,7 +503,7 @@
       upsert(thread);
       closeComposer();
       focusThread(thread.id, { scroll: false });
-      captureScreenshot(thread.id);
+      uploadScreenshot(thread.id, shot);
     } catch (error) {
       showToast(error.message);
       button.disabled = false;
@@ -583,38 +595,38 @@
   }
 
   /**
-   * Picture of the visible part of the page, sent after the comment is saved
-   * so a slow or failing capture never loses the comment itself.
+   * Picture of the visible part of the page with the element outlined, as a
+   * JPEG data URL. html2canvas clones the DOM when called, so this records
+   * the moment of picking even though rendering finishes later.
    */
-  async function captureScreenshot(id) {
-    if (!C.screenshotLibrary) return;
+  async function takeScreenshot(el) {
+    if (!C.screenshotLibrary) return null;
+    const rect = el.getBoundingClientRect();
+    const view = { x: window.scrollX, y: window.scrollY, width: window.innerWidth, height: window.innerHeight };
+    const html2canvas = await loadScreenshotLibrary();
+    const scale = Math.min(1, 1440 / view.width);
+    const canvas = await html2canvas(document.documentElement, {
+      ...view,
+      windowWidth: document.documentElement.clientWidth,
+      windowHeight: view.height,
+      scale,
+      useCORS: true,
+      logging: false,
+      backgroundColor: '#ffffff',
+      ignoreElements: (node) => node === host,
+    });
+    const ctx = canvas.getContext('2d');
+    ctx.strokeStyle = '#4f46e5';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(rect.left * scale, rect.top * scale, rect.width * scale, rect.height * scale);
+    return canvas.toDataURL('image/jpeg', 0.72);
+  }
+
+  /** Sent after the comment is saved, so a failed capture never loses a comment. */
+  async function uploadScreenshot(id, shot) {
     try {
-      const html2canvas = await loadScreenshotLibrary();
-      const scale = Math.min(1, 1440 / window.innerWidth);
-      const canvas = await html2canvas(document.documentElement, {
-        x: window.scrollX,
-        y: window.scrollY,
-        width: window.innerWidth,
-        height: window.innerHeight,
-        windowWidth: document.documentElement.clientWidth,
-        windowHeight: window.innerHeight,
-        scale,
-        useCORS: true,
-        logging: false,
-        backgroundColor: '#ffffff',
-        ignoreElements: (el) => el === host,
-      });
-      // Mark where the comment is, like the pin on the page.
-      const thread = state.threads.find((t) => t.id === id);
-      const el = thread && findElementCached(thread);
-      if (el) {
-        const rect = el.getBoundingClientRect();
-        const ctx = canvas.getContext('2d');
-        ctx.strokeStyle = '#4f46e5';
-        ctx.lineWidth = 3 * scale;
-        ctx.strokeRect(rect.left * scale, rect.top * scale, rect.width * scale, rect.height * scale);
-      }
-      const image = canvas.toDataURL('image/jpeg', 0.72);
+      const image = await shot;
+      if (!image) return;
       const result = await api('/comments/' + id + '/screenshot', { method: 'POST', body: JSON.stringify({ image }) });
       const target = state.threads.find((t) => t.id === id);
       if (target) { target.screenshot = result.screenshot; renderPanel(); }

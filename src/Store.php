@@ -47,9 +47,40 @@ class Store implements Module
         'mc_cid', 'mc_eid', '_ga', '_gl', '_hsenc', '_hsmi', 'ref', 'srsltid', 'ver', '_',
     ];
 
+    /** Bumped when stored data needs migrating; see migrate(). */
+    public const DB_VERSION = 2;
+
+    public const DB_OPTION = 'wp_review_comments_db';
+
     public function register(): void
     {
         add_action('init', [self::class, 'registerPostTypes']);
+        add_action('init', [self::class, 'migrate'], 20);
+    }
+
+    /**
+     * 2: page keys drop tracking parameters, and text fields are stored with
+     * raw characters instead of HTML entities.
+     */
+    public static function migrate(): void
+    {
+        if ((int) get_option(self::DB_OPTION, 1) >= self::DB_VERSION) {
+            return;
+        }
+        update_option(self::DB_OPTION, self::DB_VERSION);
+        $ids = get_posts(['post_type' => self::COMMENT, 'post_status' => 'any', 'post_parent' => 0, 'posts_per_page' => -1, 'fields' => 'ids']);
+        foreach ($ids as $id) {
+            $url = (string) get_post_meta($id, '_wprc_url', true);
+            if ($url !== '') {
+                update_post_meta($id, '_wprc_url', self::normalizeUrl($url));
+            }
+            foreach (['block', 'snippet', 'heading', 'page_title'] as $field) {
+                $value = (string) get_post_meta($id, '_wprc_'.$field, true);
+                if ($value !== '' && $value !== html_entity_decode($value, ENT_QUOTES)) {
+                    update_post_meta($id, '_wprc_'.$field, html_entity_decode($value, ENT_QUOTES));
+                }
+            }
+        }
     }
 
     public static function registerPostTypes(): void

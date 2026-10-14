@@ -67,7 +67,7 @@ try {
     $thread = Store::formatThread(get_post($id));
     $check('url normalised', $thread['url'] === '/smoke-test', $thread['url']);
     $check('block keeps its separators', $thread['block'] === 'wp-block-heading / wp-block-group', $thread['block']);
-    $check('snippet keeps angle brackets', $thread['snippet'] === 'Hello', $thread['snippet']);
+    $check('snippet loses markup', $thread['snippet'] === 'Hello', $thread['snippet']);
     $check('offset clamped to 0..1', $thread['offset_x'] === 1.0);
     $check('device from viewport', $thread['device'] === 'mobile');
     $check('guest owns the comment', $thread['can_modify'] === true);
