@@ -95,10 +95,17 @@
       const version = find(pattern);
       if (version) { browser = name + ' ' + version.split('.').slice(0, name === 'Safari' ? 2 : 1).join('.'); break; }
     }
+    // Brave sends Chrome's or (on iOS) Safari's user agent, without a version.
+    if (navigator.brave) browser = 'Brave';
     const touch = navigator.maxTouchPoints > 1;
     let system = 'Unknown system';
-    if (/iPhone|iPad|iPod/.test(ua)) system = 'iOS ' + (find(/OS (\d+[_\d]*)/) || '').replace(/_/g, '.');
-    else if (/Macintosh/.test(ua)) system = touch ? 'iPadOS' : 'macOS';
+    if (/iPhone|iPad|iPod/.test(ua)) {
+      // Since iOS 26 the system version in the user agent is frozen at 18.x;
+      // Safari's own version (also sent by Brave) follows the real one.
+      const webkitVersion = find(/Version\/([\d.]+)/);
+      system = 'iOS ' + (webkitVersion && parseInt(webkitVersion, 10) >= 26 ? webkitVersion : (find(/OS (\d+[_\d]*)/) || '').replace(/_/g, '.'));
+    }
+    if (system !== 'Unknown system') { /* iOS */ } else if (/Macintosh/.test(ua)) system = touch ? 'iPadOS' : 'macOS';
     else if (/Android/.test(ua)) system = 'Android ' + (find(/Android ([\d.]+)/) || '');
     else if (/Windows/.test(ua)) system = 'Windows';
     else if (/CrOS/.test(ua)) system = 'ChromeOS';
@@ -412,6 +419,7 @@
       ownActions(thread),
       thread.screenshot ? h('a', { class: 'shot', href: thread.screenshot, target: '_blank', rel: 'noopener', title: 'What the reviewer saw' },
         h('img', { src: thread.screenshot, alt: 'Screenshot when the comment was written', loading: 'lazy' })) : null,
+      thread.screenshotFailed ? h('p', { class: 'note' }, 'No screenshot: this browser blocked it. The comment itself is saved.') : null,
       where ? h('p', { class: 'detached' }, where + '. It was: “' + thread.snippet + '”') : null,
       thread.replies.map((reply) => h('div', { class: 'reply' + (reply.author_type === 'ai' ? ' ai' : '') },
         h('div', { class: 'meta' }, h('strong', {}, reply.author), h('span', { class: 'time' }, timeAgo(reply.created)), ownActions(reply)),
@@ -642,12 +650,17 @@
     if (!C.screenshotLibrary) return null;
     const rect = el.getBoundingClientRect();
     const view = { x: window.scrollX, y: window.scrollY, width: window.innerWidth, height: window.innerHeight };
+    if (!canvasReadable()) throw new Error('This browser blocks reading canvases (fingerprinting protection)');
     const html2canvas = await loadScreenshotLibrary();
     const scale = Math.min(1, 1440 / view.width);
+    // html2canvas copies the page into a viewport-sized iframe and scrolls it.
+    // WebKit (Safari, and every browser on iOS) refuses that scroll, leaving
+    // all but the top of the copy blank, so give it a copy as tall as the page.
+    const webkit = /AppleWebKit/.test(navigator.userAgent) && !/Chrome|Chromium|Edg|OPR/.test(navigator.userAgent);
     const canvas = await html2canvas(document.documentElement, {
       ...view,
       windowWidth: document.documentElement.clientWidth,
-      windowHeight: view.height,
+      windowHeight: webkit ? document.documentElement.scrollHeight : view.height,
       scale,
       useCORS: true,
       logging: false,
@@ -656,10 +669,30 @@
       onclone: () => onCopied(),
     });
     const ctx = canvas.getContext('2d');
+    // html2canvas leaves the context scaled and shifted by the scroll offset.
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.strokeStyle = '#4f46e5';
     ctx.lineWidth = 3;
     ctx.strokeRect(rect.left * scale, rect.top * scale, rect.width * scale, rect.height * scale);
     return canvas.toDataURL('image/jpeg', 0.72);
+  }
+
+  /**
+   * Brave and some privacy settings return blank or noisy pixels from
+   * canvases; a screenshot from them would be a white rectangle.
+   */
+  function canvasReadable() {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 4;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ff0000';
+      ctx.fillRect(0, 0, 4, 4);
+      const [r, g, b, a] = ctx.getImageData(1, 1, 1, 1).data;
+      return r > 200 && g < 60 && b < 60 && a > 200;
+    } catch (e) {
+      return false;
+    }
   }
 
   /** Sent after the comment is saved, so a failed capture never loses a comment. */
@@ -672,6 +705,8 @@
       if (target) { target.screenshot = result.screenshot; renderPanel(); }
     } catch (error) {
       console.warn('[wprc] screenshot', error);
+      const target = state.threads.find((t) => t.id === id);
+      if (target) { target.screenshotFailed = true; renderPanel(); }
     }
   }
 
@@ -906,6 +941,7 @@
       .meta .own { margin: 0 0 0 auto; }
       .shot { display: block; margin-top: 8px; }
       .shot img { display: block; width: 100%; max-height: 160px; object-fit: cover; object-position: top; border-radius: 6px; border: 1px solid #e4e4e7; }
+      .note { margin: 6px 0 0; font-size: 12px; color: #71717a; }
       .detached { margin: 6px 0 0; font-size: 12px; color: #b45309; }
       .reply { margin: 10px 0 0 14px; padding-left: 10px; border-left: 2px solid #e4e4e7; }
       .reply.ai { border-left-color: #a78bfa; }
