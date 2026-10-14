@@ -3,6 +3,7 @@
 Click-to-comment website review for WordPress. Clients and the team pin comments on the live (staging) site, reply in threads, and Claude reads and answers them through MCP.
 
 - **Comment on anything.** Click "+ Comment" (or press <kbd>C</kbd>), click an element, write. Pins stay on the element and follow it on scroll and resize.
+- **General comments.** "+ General comment" (top of the threads panel, or in the comment-mode hint) is for feedback about the whole page rather than one element.
 - **Menus and dropdowns too.** Open the menu first, press <kbd>C</kbd>, hover the item and press <kbd>Enter</kbd>. Clicking the overlay never counts as a click outside the menu.
 - **A screenshot with every comment**, taken when the element is picked, with the element outlined. Menus and slides are shown as the reviewer saw them.
 - **Several people at once.** Every comment has a named author; threads take replies; the page refreshes every 20 seconds and when you come back to the tab.

@@ -211,7 +211,8 @@ class Admin implements Module
                 break;
             case 'wprc_page':
                 $url = get_post_meta($id, '_wprc_url', true) ?: '/';
-                printf('<a href="%s" target="_blank">%s</a>', esc_url(home_url($url).'#wprc-'.$id), esc_html($url));
+                $general = get_post_meta($id, '_wprc_selector', true) === '';
+                printf('<a href="%s" target="_blank">%s</a>%s', esc_url(home_url($url).'#wprc-'.$id), esc_html($url), $general ? ' '.esc_html__('(general)', 'wp-review-comments') : '');
                 break;
             case 'wprc_author':
                 $thread = Store::formatComment(get_post($id));

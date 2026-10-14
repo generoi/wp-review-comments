@@ -200,7 +200,11 @@
   }
 
   /** Find a thread's element again: selector first, then its text. */
+  /** A general comment: about the whole page, not one element. */
+  const isPageComment = (thread) => !thread.selector;
+
   function findElement(thread) {
+    if (isPageComment(thread)) return null;
     let el = null;
     try { el = document.querySelector(thread.selector); } catch (e) { /* bad selector */ }
     if (el && visible(el)) return el;
@@ -228,7 +232,8 @@
   const pinLayer = h('div', { class: 'pins' });
   const highlight = h('div', { class: 'highlight', hidden: true });
   const hint = h('div', { class: 'hint', hidden: true },
-    'Click what you want to comment on, or hover it and press Enter. Esc cancels.');
+    'Click what you want to comment on, or hover it and press Enter. Esc cancels. ',
+    h('button', { class: 'link light', onclick: () => openComposer(null) }, 'General comment'));
   const walkBar = h('div', { class: 'walkbar', hidden: true });
   const toolbar = h('div', { class: 'toolbar' });
   const panel = h('aside', { class: 'panel', hidden: true });
@@ -355,6 +360,7 @@
     panel.replaceChildren(
       h('header', {},
         h('strong', {}, 'Review comments'),
+        h('button', { class: 'walk', title: 'A comment about the whole page, not one element', onclick: () => openComposer(null) }, '+ General comment'),
         h('button', { class: 'walk', title: 'Step through every open comment on the site', onclick: startWalkthrough }, 'Walkthrough'),
         h('button', { class: 'close', title: 'Close', onclick: () => togglePanel(false) }, '×'),
       ),
@@ -403,7 +409,7 @@
 
   function renderThread(thread) {
     const el = findElementCached(thread);
-    const where = !el
+    const where = isPageComment(thread) ? '' : !el
       ? 'Not found at this screen size' + (thread.device ? ' (written on ' + thread.device + ')' : '')
       : !visible(el) ? 'Hidden right now: it may be in a menu, tab or slide that is closed' : '';
     return h('article', { class: 'thread' + (thread.id === state.activeId ? ' active' : '') },
@@ -411,6 +417,7 @@
         h('span', { class: 'num status-' + thread.status }, String(thread.n)),
         h('strong', {}, thread.author),
         h('span', { class: 'time' }, timeAgo(thread.created)),
+        isPageComment(thread) ? h('span', { class: 'device page' }, 'General') : null,
         thread.device ? h('span', { class: 'device' + (thread.device !== device() ? ' other' : ''), title: 'Written at ' + thread.viewport + (thread.browser ? ' · ' + thread.browser : '') }, thread.device) : null,
         state.me.is_editor
           ? h('select', { class: 'status', title: 'Status', onclick: (e) => e.stopPropagation(), onchange: (e) => setStatus(thread.id, e.target.value) },
@@ -458,17 +465,20 @@
 
   // --- composing -----------------------------------------------------------
 
-  function openComposer(el, point) {
-    const rect = el.getBoundingClientRect();
-    const inside = point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
+  /**
+   * Compose a comment on an element, or a general comment when el is null.
+   */
+  function openComposer(el, point = { x: 0, y: 0 }) {
+    const rect = el ? el.getBoundingClientRect() : null;
+    const inside = rect && point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
     state.composer = {
       url: pageUrl(),
       page_title: document.title,
       post_id: postId(),
-      selector: selectorFor(el),
-      snippet: snippetFor(el),
-      heading: headingFor(el),
-      block: blockFor(el),
+      selector: el ? selectorFor(el) : '',
+      snippet: el ? snippetFor(el) : '',
+      heading: el ? headingFor(el) : '',
+      block: el ? blockFor(el) : '',
       offset_x: inside && rect.width ? (point.x - rect.left) / rect.width : 0.5,
       offset_y: inside && rect.height ? (point.y - rect.top) / rect.height : 0.5,
       viewport: window.innerWidth + 'x' + window.innerHeight,
@@ -481,7 +491,9 @@
     state.composer.shot = takeScreenshot(el, copied);
     state.composer.shot.catch(() => {}).finally(copied);
     setCommenting(false);
-    placeHighlight(el);
+    if (el) placeHighlight(el);
+    else highlight.hidden = true;
+    if (!el && window.innerWidth < 600) togglePanel(false);
 
     // Guests type their name once; after that it is remembered in this browser.
     const askName = !state.me.name && !store.get('name');
@@ -494,8 +506,8 @@
       h('button', { type: 'button', class: 'link', onclick: (e) => { nameFields.hidden = false; nameFields.querySelector('input').required = true; e.target.parentNode.remove(); } }, 'change')) : null;
 
     composerEl.replaceChildren(h('form', { onsubmit: (e) => { e.preventDefault(); submitComposer(e.target); } },
-      h('p', { class: 'target' }, 'On: “' + state.composer.snippet.slice(0, 70) + '”'),
-      h('textarea', { name: 'text', rows: 4, required: true, placeholder: 'What should change here?',
+      h('p', { class: 'target' }, el ? 'On: “' + state.composer.snippet.slice(0, 70) + '”' : 'General comment on: ' + document.title),
+      h('textarea', { name: 'text', rows: 4, required: true, placeholder: el ? 'What should change here?' : 'What should change on this page?',
         onkeydown: (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) e.target.form.requestSubmit(); } }),
       state.me.name ? null : nameFields,
       asWho,
@@ -507,12 +519,15 @@
     composerEl.hidden = false;
     const width = Math.min(340, window.innerWidth - 24);
     composerEl.style.width = width + 'px';
-    if (window.innerWidth < 600) {
-      // Phones: dock to the bottom, above the toolbar, so the keyboard does not hide it.
-      Object.assign(composerEl.style, { left: '12px', top: 'auto', bottom: '64px' });
+    if (window.innerWidth < 600 || !el) {
+      // Phones, and general comments: dock above the toolbar (on phones the
+      // keyboard then does not hide it).
+      Object.assign(composerEl.style, { left: 'auto', right: '16px', top: 'auto', bottom: '64px' });
+      if (window.innerWidth < 600) Object.assign(composerEl.style, { left: '12px', right: 'auto' });
     } else {
       Object.assign(composerEl.style, {
         left: Math.max(12, Math.min(point.x, window.innerWidth - width - 12)) + 'px',
+        right: 'auto',
         top: Math.max(12, Math.min(point.y + 12, window.innerHeight - 280)) + 'px',
         bottom: 'auto',
       });
@@ -650,7 +665,7 @@
    */
   async function takeScreenshot(el, onCopied = () => {}) {
     if (!C.screenshotLibrary) return null;
-    const rect = el.getBoundingClientRect();
+    const rect = el ? el.getBoundingClientRect() : null;
     const view = { x: window.scrollX, y: window.scrollY, width: window.innerWidth, height: window.innerHeight };
     if (!canvasReadable()) throw new Error('This browser blocks reading canvases (fingerprinting protection)');
     const html2canvas = await loadScreenshotLibrary();
@@ -673,9 +688,11 @@
     const ctx = canvas.getContext('2d');
     // html2canvas leaves the context scaled and shifted by the scroll offset.
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.strokeStyle = '#4f46e5';
-    ctx.lineWidth = 3;
-    ctx.strokeRect(rect.left * scale, rect.top * scale, rect.width * scale, rect.height * scale);
+    if (rect) {
+      ctx.strokeStyle = '#4f46e5';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(rect.left * scale, rect.top * scale, rect.width * scale, rect.height * scale);
+    }
     return canvas.toDataURL('image/jpeg', 0.72);
   }
 
@@ -909,6 +926,9 @@
       .toolbar button.active { background: #18181b; border-color: #18181b; }
       .count { min-width: 20px; padding: 1px 6px; border-radius: 999px; background: #4f46e5; color: #fff; font-size: 12px; }
       .hint { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); background: #18181b; color: #fff; padding: 8px 14px; border-radius: 8px; font-size: 13px; max-width: calc(100vw - 24px); text-align: center; pointer-events: none; }
+      .hint .link { pointer-events: auto; }
+      .link.light { color: #c7d2fe; font-size: 13px; }
+      .device.page { background: #eef2ff; color: #3730a3; }
       .highlight { position: fixed; pointer-events: none; outline: 2px solid #4f46e5; outline-offset: 2px; background: rgba(79,70,229,.08); border-radius: 2px; transition: all .08s; }
       .pin { position: fixed; width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: 50% 50% 50% 0; border: 2px solid #fff; background: #4f46e5; color: #fff; font-size: 12px; font-weight: 700; box-shadow: 0 2px 8px rgba(0,0,0,.3); padding: 0; }
       .pin.active { transform: scale(1.25); background: #18181b; }

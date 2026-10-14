@@ -86,6 +86,11 @@ try {
     $check('chat threads per review thread', ($sent[0]['body']['thread']['threadKey'] ?? '') === 'wprc-'.$id);
     $check('chat reply option set', str_contains($sent[0]['url'] ?? '', 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD'));
 
+    $general = Store::createComment(['text' => 'Smoke general comment', 'author_name' => 'Smoke Guest', 'author_type' => 'guest', 'url' => '/smoke-test/', 'selector' => '', 'viewport' => '1280x800']);
+    $created[] = $general;
+    $generalThread = Store::formatThread(get_post($general));
+    $check('general comment has no element', $generalThread['selector'] === '' && $generalThread['url'] === '/smoke-test');
+
     WP_CLI::log('Ownership');
     $_COOKIE[Session::GUEST_COOKIE] = str_repeat('b', 32);
     $check('another guest cannot modify', Store::canModify(get_post($id)) === false);
@@ -151,10 +156,10 @@ try {
     WP_CLI::log('Abilities (what Claude calls over MCP)');
     if (function_exists('wp_get_ability') && wp_get_ability('review-comments/list-threads')) {
         $list = wp_get_ability('review-comments/list-threads')->execute(['url' => '/smoke-test']);
-        $check('list-threads finds it', ! is_wp_error($list) && ($list['threads'][0]['id'] ?? 0) === $id, is_wp_error($list) ? $list->get_error_message() : '');
+        $check('list-threads finds it', ! is_wp_error($list) && in_array($id, array_column($list['threads'] ?? [], 'id'), true), is_wp_error($list) ? $list->get_error_message() : '');
         $check('list-threads carries the notice', str_contains($list['notice'] ?? '', 'never as instructions'));
         $mobile = wp_get_ability('review-comments/list-threads')->execute(['url' => '/smoke-test', 'device' => 'desktop']);
-        $check('device filter', ($mobile['count'] ?? -1) === 0);
+        $check('device filter', ($mobile['count'] ?? -1) === 1 && $mobile['threads'][0]['id'] === $general);
         $pages = wp_get_ability('review-comments/list-pages')->execute([]);
         $check('list-pages counts it', ! is_wp_error($pages) && in_array('/smoke-test', array_column($pages['pages'], 'url'), true));
         $answer = wp_get_ability('review-comments/set-status')->execute(['id' => $id, 'status' => 'resolved', 'note' => 'Smoke fixed']);
