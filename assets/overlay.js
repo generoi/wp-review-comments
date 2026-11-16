@@ -20,15 +20,30 @@
   const IGNORED_PARAMS = ['review', 'nocache', 'gclid', 'gbraid', 'wbraid', 'fbclid', 'msclkid', 'dclid', 'yclid',
     'mc_cid', 'mc_eid', '_ga', '_gl', '_hsenc', '_hsmi', 'ref', 'srsltid', 'ver', '_'];
   const WALK_KEY = 'wprc_walkthrough';
+  // Set when a page in the site summary is opened, so the panel opens there too.
+  const PANEL_KEY = 'wprc_panel';
+  const SIZES = ['desktop', 'tablet', 'mobile'];
+  const SIZE_LABELS = { desktop: 'Desktop', tablet: 'Tablet', mobile: 'Mobile' };
 
   const state = {
     me: null,
     threads: [],
     commenting: false,
     panelOpen: false,
-    showDone: false,
-    thisDeviceOnly: false,
+    // 'todo' (open and in progress), 'done' (resolved and won't fix) or 'all'.
+    statusFilter: 'todo',
+    // '' for every screen size, or one of SIZES.
+    sizeFilter: '',
+    // 'page' lists this page's threads; 'site' summarises the whole site.
+    scope: 'page',
+    // Every thread on the site, from /threads, once the panel has opened.
+    site: null,
+    siteError: null,
+    menuOpen: false,
     activeId: null,
+    // The thread open in the panel's detail view.
+    detailId: null,
+    hoverId: null,
     editingId: null,
     drafts: {},
     composer: null,
@@ -84,7 +99,7 @@
   }
 
   /**
-   * Readable browser and system, e.g. "Safari 18.4 · iOS 18.4 · touch · 3x".
+   * Readable browser and system, e.g. "Safari 18.4, iOS 18.4, touch, 3x".
    * Layout bugs are often specific to one browser, so reviewers' setups matter.
    */
   function browserInfo() {
@@ -116,7 +131,7 @@
     else if (/CrOS/.test(ua)) system = 'ChromeOS';
     else if (/Linux/.test(ua)) system = 'Linux';
     const ratio = Math.round((window.devicePixelRatio || 1) * 100) / 100;
-    return [browser, system.trim(), touch ? 'touch' : '', ratio !== 1 ? ratio + 'x' : ''].filter(Boolean).join(' · ');
+    return [browser, system.trim(), touch ? 'touch' : '', ratio !== 1 ? ratio + 'x' : ''].filter(Boolean).join(', ');
   }
 
   function h(tag, props = {}, ...children) {
@@ -128,7 +143,7 @@
       else if (key in el && key !== 'list') el[key] = value;
       else el.setAttribute(key, value);
     }
-    for (const child of children.flat()) {
+    for (const child of children.flat(Infinity)) {
       if (child == null || child === false) continue;
       el.append(child.nodeType ? child : document.createTextNode(String(child)));
     }
@@ -236,19 +251,35 @@
   root.append(h('style', {}, CSS_TEXT()));
   const pinLayer = h('div', { class: 'pins' });
   const highlight = h('div', { class: 'highlight', hidden: true });
-  const hint = h('div', { class: 'hint', hidden: true },
-    'Click what you want to comment on, or hover it and press Enter. Esc cancels. ',
-    h('button', { class: 'link light', onclick: () => openComposer(null) }, 'General comment'));
-  const walkBar = h('div', { class: 'walkbar', hidden: true });
-  const toolbar = h('div', { class: 'toolbar' });
-  const panel = h('aside', { class: 'panel', hidden: true });
+  // Comment mode lives in the panel; this small hint is for when the panel is
+  // closed while picking (on phones, where the panel would cover the page).
+  const hint = h('div', { class: 'hint', hidden: true, role: 'status' });
+  const fab = h('button', { class: 'fab', hidden: true, title: 'Open the review panel', onclick: () => togglePanel(true) });
+  const panel = h('aside', { class: 'panel', hidden: true, 'aria-label': 'Review comments' });
   const composerEl = h('div', { class: 'composer', hidden: true });
-  const toast = h('div', { class: 'toast', hidden: true });
-  root.append(pinLayer, highlight, walkBar, hint, panel, toolbar, composerEl, toast);
+  const toast = h('div', { class: 'toast', hidden: true, role: 'status' });
+  root.append(pinLayer, highlight, hint, panel, fab, composerEl, toast);
   // Clicks in the overlay must not reach the page: menus and modals close on
   // "click outside", which would hide the element being commented on.
   for (const type of ['click', 'dblclick', 'contextmenu', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'pointermove', 'touchstart', 'touchend', 'focusin', 'focusout', 'keydown', 'keypress', 'keyup', 'input', 'wheel']) {
     host.addEventListener(type, (event) => event.stopPropagation());
+  }
+  // A click anywhere in the panel outside the ⋯ menu closes it.
+  panel.addEventListener('click', (event) => {
+    if (state.menuOpen && !event.composedPath().some((node) => node.classList && node.classList.contains('menu'))) {
+      state.menuOpen = false;
+      renderPanel();
+    }
+  });
+
+  const ICONS = {
+    close: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+    more: '<svg width="18" height="18" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="19" cy="12" r="1.8" fill="currentColor"/></svg>',
+  };
+  function icon(name) {
+    const span = h('span', { class: 'icon', 'aria-hidden': 'true' });
+    span.innerHTML = ICONS[name];
+    return span;
   }
 
   function showToast(message) {
@@ -258,48 +289,107 @@
     showToast.timer = setTimeout(() => { toast.hidden = true; }, 5000);
   }
 
+  const isTodo = (thread) => !DONE.includes(thread.status);
+  const matchesStatus = (thread) => state.statusFilter === 'all' || (state.statusFilter === 'done' ? !isTodo(thread) : isTodo(thread));
+  const matchesSize = (thread) => !state.sizeFilter || !thread.device || thread.device === state.sizeFilter;
+
   /** Threads shown with the current filters. */
   function shown(thread) {
     if (thread.id === state.activeId) return true;
-    if (!state.showDone && DONE.includes(thread.status)) return false;
-    if (state.thisDeviceOnly && thread.device && thread.device !== device()) return false;
-    return true;
+    return matchesStatus(thread) && matchesSize(thread);
   }
 
-  function renderToolbar() {
-    const open = state.threads.filter((t) => !DONE.includes(t.status)).length;
-    toolbar.replaceChildren(
-      h('button', {
-        class: 'primary' + (state.commenting ? ' active' : ''),
-        title: 'Comment on part of the page (shortcut: C)',
-        onclick: () => setCommenting(!state.commenting),
-      }, state.commenting ? 'Cancel' : '+ Comment'),
-      h('button', { title: 'Comments on this page', onclick: () => togglePanel() }, 'Threads', h('span', { class: 'count' }, String(open))),
+  /** "/contact" as the site writes its links ("/contact/"), for showing and opening. */
+  function displayPath(key) {
+    const [path, query] = (key || '/').split('?');
+    const slash = location.pathname.endsWith('/') && path !== '/' && !/\.[a-z0-9]+$/i.test(path);
+    return path + (slash ? '/' : '') + (query ? '?' + query : '');
+  }
+
+  /** A page title without the site name the theme appends ("Contact – Site"). */
+  function shortTitle(title) {
+    const split = (text) => (text || '').split(/\s[–—|-]\s/);
+    const parts = split(title);
+    const site = split(document.title);
+    return parts.length > 1 && parts[parts.length - 1] === site[site.length - 1] ? parts.slice(0, -1).join(' – ') : (title || '');
+  }
+
+  const cut = (text, max) => (text.length > max ? text.slice(0, max - 1).trimEnd() + '…' : text);
+  const statusPill = (status) => h('span', { class: 'st st-' + status }, STATUS_LABELS[status] || status);
+  const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
+  const initials = (name) => (name || '?').split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0].toUpperCase()).join('');
+  const browserLabel = (text) => (text || '').replace(/ · /g, ', ');
+
+  function blockLabel(block) {
+    const first = (block || '').split(' / ')[0].replace(/^wp-block-/, '').replace(/-/g, ' ');
+    return first ? first[0].toUpperCase() + first.slice(1) + ' block' : '';
+  }
+
+  /** Where on the page a thread is, from the heading, snippet and block it stored. */
+  function whereLabel(thread) {
+    if (isPageComment(thread)) return 'Whole page';
+    const snippet = thread.snippet && !thread.snippet.startsWith('<') ? thread.snippet : '';
+    const heading = thread.heading || '';
+    if (heading && snippet.startsWith(heading)) return 'Heading: ' + cut(heading, 60);
+    if (heading && snippet) return cut(heading, 34) + ' › ' + cut(snippet, 34);
+    if (heading) return cut(heading, 40) + (thread.block ? ' › ' + blockLabel(thread.block) : '');
+    return snippet ? cut(snippet, 60) : (blockLabel(thread.block) || 'Part of the page');
+  }
+
+  function sizeLabel(thread) {
+    if (!thread.device) return '';
+    const width = parseInt(thread.viewport, 10);
+    return SIZE_LABELS[thread.device] + (width ? ', ' + width + ' px' : '');
+  }
+
+  function renderFab() {
+    const open = state.threads.filter(isTodo).length;
+    fab.replaceChildren('Review', h('span', { class: 'n' }, open + ' open'));
+    fab.hidden = state.panelOpen || state.commenting;
+  }
+
+  function renderHint() {
+    hint.hidden = !(state.commenting && !state.panelOpen);
+    if (hint.hidden) return;
+    hint.replaceChildren(
+      h('span', {}, 'Tap the part of the page you want to comment on.'),
+      h('span', { class: 'row' },
+        h('button', { class: 'solid', onclick: () => setCommenting(false) }, 'Cancel'),
+        h('button', { onclick: () => openComposer(null) }, 'Whole page'),
+      ),
     );
   }
 
   function setCommenting(on) {
     state.commenting = on;
+    state.menuOpen = false;
     document.documentElement.classList.toggle('wprc-commenting', on);
-    hint.hidden = !on;
     if (on) {
       closeComposer();
       // On phones the panel covers most of the page; get it out of the way.
+      // Elsewhere comment mode shows at the top of the panel.
       if (window.innerWidth < 600) togglePanel(false);
+      else if (!state.panelOpen) togglePanel(true);
       if (state.hovered) placeHighlight(state.hovered);
       // Ready before picking, so the page is copied before anything changes.
       loadScreenshotLibrary().catch(() => {});
     } else {
-      highlight.hidden = true;
+      restoreHighlight();
     }
-    renderToolbar();
+    renderFab();
+    renderHint();
+    renderPanel();
   }
 
   function togglePanel(open = !state.panelOpen) {
+    const opening = open && !state.panelOpen;
     state.panelOpen = open;
-    if (!open) state.editingId = null;
+    if (!open) { state.editingId = null; state.menuOpen = false; }
     panel.hidden = !open;
+    renderFab();
+    renderHint();
     if (open) renderPanel();
+    if (opening) loadSite().catch(() => {});
   }
 
   function numbered() {
@@ -312,12 +402,39 @@
       const pin = h('button', {
         class: 'pin status-' + thread.status + (thread.id === state.activeId ? ' active' : '') + (thread.device && thread.device !== device() ? ' other-device' : ''),
         title: thread.author + (thread.device ? ' (' + thread.device + ')' : '') + ': ' + thread.text.slice(0, 80),
-        onclick: () => focusThread(thread.id),
+        onclick: () => openThread(thread.id),
+        onmouseenter: () => markCard(thread.id, true),
+        onmouseleave: () => markCard(thread.id, false),
       }, String(thread.n));
       pin.dataset.id = thread.id;
       return pin;
     }));
     positionPins();
+  }
+
+  function markCard(id, on) {
+    const card = panel.querySelector('.card[data-id="' + id + '"]');
+    if (card) card.classList.toggle('hl', on);
+  }
+
+  /** Hovering or focusing a card lifts its pin and outlines its element. */
+  function hoverThread(id, on) {
+    state.hoverId = on ? id : null;
+    const pin = pinLayer.querySelector('.pin[data-id="' + id + '"]');
+    if (pin) pin.classList.toggle('hl', on);
+    if (state.commenting || state.composer) return;
+    const thread = on && state.threads.find((t) => t.id === id);
+    const el = thread && findElementCached(thread);
+    if (el && visible(el)) placeHighlight(el);
+    else restoreHighlight();
+  }
+
+  /** Outline the open thread's element, or nothing. */
+  function restoreHighlight() {
+    const thread = state.activeId && state.threads.find((t) => t.id === state.activeId);
+    const el = thread && findElementCached(thread);
+    if (el && visible(el)) placeHighlight(el);
+    else highlight.hidden = true;
   }
 
   function positionPins() {
@@ -332,13 +449,11 @@
     }
     // The outline follows its element while scrolling (and while the phone
     // keyboard scrolls the page).
+    const outlined = (id) => { const t = state.threads.find((x) => x.id === id); return t && findElementCached(t); };
     if (state.composer && state.composerEl && state.composerEl.isConnected) placeHighlight(state.composerEl);
     else if (state.commenting && state.hovered && state.hovered.isConnected) placeHighlight(state.hovered);
-    else if (state.activeId && !highlight.hidden && !state.commenting && !state.composer) {
-      const thread = state.threads.find((t) => t.id === state.activeId);
-      const el = thread && findElementCached(thread);
-      if (el) placeHighlight(el);
-    }
+    else if (state.hoverId && !highlight.hidden && outlined(state.hoverId)) placeHighlight(outlined(state.hoverId));
+    else if (state.activeId && !highlight.hidden && !state.commenting && !state.composer && outlined(state.activeId)) placeHighlight(outlined(state.activeId));
   }
 
   const elementCache = new Map();
@@ -360,30 +475,325 @@
     return state.me.name || store.get('name') || 'Guest reviewer';
   }
 
+  // --- panel ---------------------------------------------------------------
+
   function renderPanel() {
     if (!state.panelOpen) return;
     // Do not wipe what someone is typing; the next poll catches up.
-    if (root.activeElement && panel.contains(root.activeElement) && root.activeElement.tagName === 'TEXTAREA') return;
+    const focused = root.activeElement;
+    if (focused && panel.contains(focused) && focused.tagName === 'TEXTAREA') return;
+    const focusKey = focused && panel.contains(focused) ? focused.getAttribute('data-key') : null;
+    const body = panel.querySelector('.p-body');
+    const scroll = body ? body.scrollTop : 0;
 
-    const items = numbered().filter(shown).reverse();
-    const hidden = state.threads.length - items.length;
-    panel.replaceChildren(
-      h('header', {},
-        h('strong', {}, 'Review comments'),
-        h('button', { class: 'walk', title: 'A comment about the whole page, not one element', onclick: () => openComposer(null) }, '+ General comment'),
-        h('button', { class: 'walk', title: 'Step through every open comment on the site', onclick: startWalkthrough }, 'Walkthrough'),
-        h('button', { class: 'close', title: 'Close', onclick: () => togglePanel(false) }, '×'),
+    const list = numbered();
+    let view;
+    let kind;
+    if (state.walk) {
+      kind = 'walk-' + state.walk.index;
+      view = renderWalk(list);
+    } else if (state.detailId && list.some((t) => t.id === state.detailId)) {
+      kind = 'detail-' + state.detailId;
+      view = renderDetail(list.find((t) => t.id === state.detailId));
+    } else {
+      state.detailId = null;
+      kind = 'list-' + state.scope;
+      view = [renderHeader(list), h('div', { class: 'p-body' }, state.scope === 'site' ? renderSite() : renderList(list))];
+    }
+    panel.classList.toggle('picking', state.commenting);
+    panel.replaceChildren(state.commenting ? renderPickbar() : '', ...view.filter(Boolean));
+
+    const newBody = panel.querySelector('.p-body');
+    if (newBody && panel.dataset.view === kind) newBody.scrollTop = scroll;
+    panel.dataset.view = kind;
+    // Keyboard focus survives the re-render.
+    if (focusKey) {
+      const again = panel.querySelector('[data-key="' + CSS.escape(focusKey) + '"]');
+      if (again) again.focus();
+    }
+  }
+
+  function renderPickbar() {
+    return h('div', { class: 'pickbar', role: 'status' },
+      h('b', {}, 'Click the part of the page you want to comment on'),
+      h('span', {}, 'Or hover it and press Enter. Esc cancels.'),
+      h('div', { class: 'row' },
+        h('button', { type: 'button', class: 'solid', 'data-key': 'pick-cancel', onclick: () => setCommenting(false) }, 'Cancel'),
+        h('button', { type: 'button', 'data-key': 'pick-page', onclick: () => openComposer(null) }, 'Comment on the whole page'),
       ),
-      h('div', { class: 'filters' },
-        h('label', {}, h('input', { type: 'checkbox', checked: state.showDone, onchange: (e) => { state.showDone = e.target.checked; render(); } }), ' Show resolved'),
-        h('label', {}, h('input', { type: 'checkbox', checked: state.thisDeviceOnly, onchange: (e) => { state.thisDeviceOnly = e.target.checked; render(); } }), ' Only ' + device()),
+    );
+  }
+
+  function renderMenu() {
+    const close = () => { state.menuOpen = false; };
+    return h('div', { class: 'menu' },
+      h('button', {
+        type: 'button', class: 'iconbtn', title: 'More', 'aria-label': 'More', 'aria-haspopup': 'menu', 'aria-expanded': String(state.menuOpen), 'data-key': 'more',
+        onclick: () => { state.menuOpen = !state.menuOpen; renderPanel(); },
+      }, icon('more')),
+      state.menuOpen ? h('div', { class: 'menu-pop', role: 'menu' },
+        h('p', { class: 'menu-who' }, 'Commenting as ' + whoAmI(), state.me.round ? h('br') : null, state.me.round ? 'Review round: ' + state.me.round : null),
+        h('button', { type: 'button', role: 'menuitem', 'data-key': 'menu-general', onclick: () => { close(); openComposer(null); } },
+          h('span', {}, 'General comment'), h('small', {}, 'Feedback about the whole page, not one part')),
+        state.me.links ? h('a', { role: 'menuitem', href: state.me.links, target: '_blank', rel: 'noopener', 'data-key': 'menu-links', onclick: () => { close(); renderPanel(); } },
+          h('span', {}, 'Make a review link'), h('small', {}, 'For guests without an account, in a new tab')) : null,
+      ) : null,
+    );
+  }
+
+  function renderHeader(list) {
+    const pageTodo = list.filter(isTodo).length;
+    const siteTodo = state.site ? state.site.filter(isTodo).length : null;
+    const tab = (scope, label, n) => h('button', {
+      type: 'button', 'aria-pressed': String(state.scope === scope), 'data-key': 'tab-' + scope,
+      onclick: () => setScope(scope),
+    }, label, n == null ? null : h('span', { class: 'n' }, String(n)));
+    return h('header', { class: 'p-head' },
+      h('div', { class: 'p-top' },
+        h('h2', {}, 'Review'),
+        h('span', { class: 'where', title: displayPath(pageUrl()) }, displayPath(pageUrl())),
+        renderMenu(),
+        h('button', { type: 'button', class: 'iconbtn', title: 'Close', 'aria-label': 'Close panel', 'data-key': 'close', onclick: () => togglePanel(false) }, icon('close')),
       ),
-      h('p', { class: 'who' }, 'Commenting as ' + whoAmI(), state.me.round ? ' · ' + state.me.round : ''),
-      items.length
-        ? h('div', { class: 'threads' }, items.map(renderThread), hidden ? h('p', { class: 'more' }, hidden + ' hidden by filters') : null)
-        : h('p', { class: 'empty' }, hidden
-          ? hidden + ' comment' + (hidden === 1 ? ' is' : 's are') + ' hidden by the filters above.'
-          : 'No comments on this page yet. Click “+ Comment” (or press C) and then the part of the page you want to comment on.'),
+      h('button', {
+        type: 'button', class: 'primary big', title: 'Comment on part of the page (shortcut: C)', 'data-key': 'comment',
+        onclick: () => setCommenting(!state.commenting),
+      }, state.commenting ? 'Cancel' : ['+ Comment', h('kbd', {}, 'C')]),
+      h('div', { class: 'tabs', role: 'group', 'aria-label': 'Which comments' },
+        tab('page', 'This page', pageTodo), tab('site', 'Whole site', siteTodo)),
+      state.scope === 'page' && list.length ? renderFilters(list) : null,
+    );
+  }
+
+  function setScope(scope) {
+    state.scope = scope;
+    if (scope === 'site') loadSite().catch(() => {});
+    renderPanel();
+  }
+
+  function renderFilters(list) {
+    const sized = list.filter(matchesSize);
+    const chip = (key, label, pressed, onclick, n, extra) => h('button', {
+      type: 'button', class: 'chip', 'aria-pressed': String(pressed), 'data-key': 'chip-' + key, onclick,
+    }, extra || null, label, n == null ? null : h('span', { class: 'n' }, String(n)));
+    const status = (value, label, n) => chip(value, label, state.statusFilter === value, () => { state.statusFilter = value; render(); }, n);
+    const size = (value, label) => chip('size-' + (value || 'all'), label, state.sizeFilter === value, () => { state.sizeFilter = value; render(); }, null,
+      value && value === device() ? h('span', { class: 'now', title: 'Your screen now' }) : null);
+    // Sizes with comments, and the viewer's own.
+    const sizes = SIZES.filter((s) => s === device() || s === state.sizeFilter || list.some((t) => t.device === s));
+    return h('div', { class: 'filters' },
+      h('div', { class: 'chips', role: 'group', 'aria-label': 'Status' },
+        status('todo', 'To do', sized.filter(isTodo).length),
+        status('done', 'Resolved', sized.filter((t) => !isTodo(t)).length),
+        status('all', 'All', sized.length)),
+      h('span', { class: 'sep', 'aria-hidden': 'true' }),
+      h('div', { class: 'chips', role: 'group', 'aria-label': 'Screen size' },
+        size('', 'All sizes'), sizes.map((s) => size(s, SIZE_LABELS[s]))),
+    );
+  }
+
+  function renderList(list) {
+    if (!list.length) {
+      const elsewhere = state.site ? state.site.filter((t) => isTodo(t) && t.url !== pageUrl()).length : 0;
+      return h('div', { class: 'empty' },
+        h('b', {}, 'No comments on this page yet.'),
+        h('span', {}, 'Press Comment, or the C key, then click the part of the page you want to talk about.'),
+        elsewhere ? h('span', {}, elsewhere + ' open on other pages. ', h('button', { type: 'button', class: 'link', 'data-key': 'see-site', onclick: () => setScope('site') }, 'See the whole site')) : null,
+      );
+    }
+    const items = list.filter(shown);
+    if (!items.length) {
+      return h('div', { class: 'empty' },
+        h('b', {}, 'Nothing here'),
+        h('span', {}, 'No comments on this page match these filters.'),
+        h('span', {}, h('button', { type: 'button', class: 'link', 'data-key': 'show-all', onclick: () => { state.statusFilter = 'all'; state.sizeFilter = ''; render(); } }, 'Show all')),
+      );
+    }
+    return items.map(renderCard);
+  }
+
+  function renderCard(thread) {
+    const el = findElementCached(thread);
+    const missing = !isPageComment(thread) && (!el || !visible(el));
+    const replies = thread.replies.length;
+    const card = h('button', {
+      type: 'button', class: 'card' + (thread.id === state.activeId ? ' active' : ''), 'data-key': 'card-' + thread.id,
+      onclick: () => openThread(thread.id),
+      onmouseenter: () => hoverThread(thread.id, true),
+      onmouseleave: () => hoverThread(thread.id, false),
+      onfocus: () => hoverThread(thread.id, true),
+      onblur: () => hoverThread(thread.id, false),
+    },
+      h('span', { class: 'num status-' + thread.status }, String(thread.n)),
+      h('span', { class: 'c-main' },
+        h('span', { class: 'c-meta' }, h('b', {}, thread.author), h('span', {}, timeAgo(thread.created))),
+        h('span', { class: 'c-where' }, whereLabel(thread)),
+        h('span', { class: 'c-text' + (thread.deleted ? ' deleted' : '') }, thread.deleted ? 'Comment deleted' : thread.text),
+        h('span', { class: 'c-foot' },
+          statusPill(thread.status),
+          thread.device ? h('span', { class: thread.device !== device() ? 'other' : '' }, SIZE_LABELS[thread.device]) : null,
+          replies ? h('span', {}, plural(replies, 'reply', 'replies')) : null,
+          missing ? h('span', { class: 'warn', title: 'Not found or hidden at this screen size' }, 'Not visible here') : null,
+        ),
+      ),
+    );
+    card.dataset.id = thread.id;
+    return card;
+  }
+
+  // --- whole site ------------------------------------------------------------
+
+  let sitePromise = null;
+  /** Every thread on the site (without replies), for the summary and going through. */
+  function loadSite() {
+    sitePromise ||= api('/threads')
+      .then((all) => { state.site = all; state.siteError = null; renderPanel(); return all; })
+      .catch((error) => { state.siteError = error.message; renderPanel(); throw error; })
+      .finally(() => { sitePromise = null; });
+    return sitePromise;
+  }
+
+  /** Keep the site summary in step with changes made on this page. */
+  function syncSite(thread, removed) {
+    if (!state.site) return;
+    const index = state.site.findIndex((t) => t.id === (removed || thread.id));
+    if (removed) { if (index !== -1) state.site.splice(index, 1); return; }
+    const summary = {
+      id: thread.id, url: thread.url || pageUrl(), page_title: thread.page_title, status: thread.status, device: thread.device,
+      created: thread.created, author: thread.author, text: thread.text, activity: new Date().toISOString(),
+    };
+    if (index === -1) state.site.push(summary);
+    else state.site[index] = { ...state.site[index], status: thread.status, text: thread.text, activity: summary.activity };
+  }
+
+  /** Threads grouped by page, most to do first. */
+  function sitePages(all) {
+    const pages = new Map();
+    for (const t of all) {
+      const page = pages.get(t.url) || { url: t.url, title: '', open: 0, in_progress: 0, done: 0, activity: '' };
+      page.title ||= t.page_title;
+      if (t.status === 'open') page.open++;
+      else if (t.status === 'in_progress') page.in_progress++;
+      else page.done++;
+      const at = t.activity || t.created;
+      if (at > page.activity) page.activity = at;
+      pages.set(t.url, page);
+    }
+    return [...pages.values()].sort((a, b) => (b.open + b.in_progress) - (a.open + a.in_progress) || b.activity.localeCompare(a.activity));
+  }
+
+  function renderSite() {
+    if (!state.site) return h('p', { class: 'empty' }, state.siteError || 'Loading…');
+    if (!state.site.length) {
+      return h('div', { class: 'empty' }, h('b', {}, 'No comments on the site yet.'), h('span', {}, 'Comments from every page show up here.'));
+    }
+    const pages = sitePages(state.site);
+    const total = pages.reduce((sum, p) => ({ open: sum.open + p.open, in_progress: sum.in_progress + p.in_progress, done: sum.done + p.done }), { open: 0, in_progress: 0, done: 0 });
+    const todo = total.open + total.in_progress;
+    const stat = (n, label) => h('span', {}, h('b', {}, String(n)), label);
+    const segment = (n, status) => (n ? h('i', { class: 'status-' + status, style: 'flex:' + n }) : null);
+    return [
+      h('div', { class: 'sum' },
+        h('div', { class: 'sum-n' }, stat(total.open, 'open'), stat(total.in_progress, 'in progress'), stat(total.done, 'resolved')),
+        h('div', { class: 'bar', role: 'img', 'aria-label': total.open + ' open, ' + total.in_progress + ' in progress, ' + total.done + ' resolved' },
+          segment(total.open, 'open'), segment(total.in_progress, 'in_progress'), segment(total.done, 'resolved')),
+        todo
+          ? h('button', { type: 'button', class: 'primary go', 'data-key': 'go', title: 'One comment at a time, with ← and →', onclick: startWalkthrough }, 'Go through ' + todo + ' to do, page by page →')
+          : h('p', { class: 'note' }, 'Nothing left to do on the site.'),
+      ),
+      h('div', { class: 'grp' }, 'By page, most to do first'),
+      pages.map(renderPageRow),
+    ];
+  }
+
+  function renderPageRow(page) {
+    const here = page.url === pageUrl();
+    const pill = (n, status, label) => (n ? h('span', { class: 'st st-' + status, title: n + ' ' + label }, String(n) + (status === 'open' ? ' open' : ''), status === 'open' ? null : h('span', { class: 'sr' }, ' ' + label)) : null);
+    return h('button', {
+      type: 'button', class: 'prow' + (here ? ' here' : ''), 'data-key': 'page-' + page.url,
+      onclick: () => {
+        if (here) { setScope('page'); return; }
+        session.set(PANEL_KEY, 1);
+        location.href = displayPath(page.url);
+      },
+    },
+      h('span', { class: 'pr-main' },
+        h('b', {}, shortTitle(page.title) || displayPath(page.url)),
+        here ? h('span', { class: 'you' }, 'You are here') : null,
+        h('span', { class: 'pr-path' }, displayPath(page.url) + ', last activity ' + timeAgo(page.activity)),
+      ),
+      h('span', { class: 'pr-counts' },
+        pill(page.open, 'open', 'open'),
+        pill(page.in_progress, 'in_progress', 'in progress'),
+        page.done ? h('span', { class: 'pr-done', title: page.done + ' resolved' }, page.done + ' ✓', h('span', { class: 'sr' }, ' resolved')) : null,
+      ),
+    );
+  }
+
+  // --- one thread ------------------------------------------------------------
+
+  function openThread(id) {
+    focusThread(id);
+  }
+
+  function closeDetail() {
+    state.detailId = null;
+    state.activeId = null;
+    highlight.hidden = true;
+    if (/^#wprc-\d+$/.test(location.hash) && history.replaceState) history.replaceState(null, '', location.pathname + location.search);
+    renderPins();
+    renderPanel();
+  }
+
+  function statusControl(thread) {
+    if (!state.me.is_editor) return statusPill(thread.status);
+    return h('select', { class: 'status', 'aria-label': 'Status', 'data-key': 'status-' + thread.id, onchange: (e) => setStatus(thread.id, e.target.value) },
+      Object.entries(STATUS_LABELS).map(([value, label]) => h('option', { value, selected: value === thread.status }, label)));
+  }
+
+  function renderDetail(thread) {
+    return [
+      h('div', { class: 'd-head' },
+        h('button', { type: 'button', class: 'back', 'data-key': 'back', onclick: closeDetail }, '‹ All comments'),
+        h('span', { class: 'num status-' + thread.status }, String(thread.n)),
+        statusControl(thread),
+      ),
+      h('div', { class: 'p-body' }, renderThreadBody(thread, false)),
+      renderReplyBox(thread, false),
+    ];
+  }
+
+  function renderThreadBody(thread, walking) {
+    const el = findElementCached(thread);
+    const where = isPageComment(thread) ? '' : !el
+      ? 'Not found at this screen size' + (thread.device ? ' (written on ' + thread.device + ')' : '')
+      : !visible(el) ? 'Hidden right now: it may be in a menu, tab or slide that is closed' : '';
+    return h('div', { class: 'd-body' },
+      walking ? h('div', { class: 'c-meta' }, h('span', { class: 'num status-' + thread.status }, String(thread.n)), h('b', {}, thread.author), h('span', {}, timeAgo(thread.created)), statusControl(thread)) : null,
+      thread.screenshot ? h('a', { class: 'shot', href: thread.screenshot, target: '_blank', rel: 'noopener', title: 'What the reviewer saw' },
+        h('img', { src: thread.screenshot, alt: 'Screenshot when the comment was written', loading: 'lazy' })) : null,
+      thread.screenshotFailed ? h('p', { class: 'note' }, thread.screenshotFailed === 'blocked'
+        ? 'No screenshot: this browser blocked it. The comment itself is saved.'
+        : 'The screenshot could not be saved. The comment itself is saved.') : null,
+      h('div', { class: 'ctx' },
+        h('span', {}, whereLabel(thread)),
+        thread.device ? h('span', { title: 'Written at ' + thread.viewport }, sizeLabel(thread)) : null,
+        thread.browser ? h('span', {}, browserLabel(thread.browser)) : null,
+      ),
+      where ? h('p', { class: 'detached' }, where + '. It was: “' + thread.snippet + '”') : null,
+      walking ? h('div', { class: 'msg solo' }, renderBody(thread), ownActions(thread)) : renderMessage(thread),
+      thread.replies.map(renderMessage),
+    );
+  }
+
+  function renderMessage(comment) {
+    const ai = comment.author_type === 'ai';
+    return h('div', { class: 'msg' + (ai ? ' ai' : '') },
+      h('span', { class: 'av' + (ai ? ' c' : ''), 'aria-hidden': 'true' }, initials(comment.author)),
+      h('div', { class: 'm-main' },
+        h('div', { class: 'c-meta' }, h('b', {}, comment.author), h('span', {}, timeAgo(comment.created)), ownActions(comment)),
+        renderBody(comment),
+      ),
     );
   }
 
@@ -417,49 +827,47 @@
     if (textarea) { textarea.focus(); textarea.setSelectionRange(textarea.value.length, textarea.value.length); }
   }
 
-  function renderThread(thread) {
-    const el = findElementCached(thread);
-    const where = isPageComment(thread) ? '' : !el
-      ? 'Not found at this screen size' + (thread.device ? ' (written on ' + thread.device + ')' : '')
-      : !visible(el) ? 'Hidden right now: it may be in a menu, tab or slide that is closed' : '';
-    return h('article', { class: 'thread' + (thread.id === state.activeId ? ' active' : '') },
-      h('div', { class: 'meta', onclick: () => focusThread(thread.id) },
-        h('span', { class: 'num status-' + thread.status }, String(thread.n)),
-        h('strong', {}, thread.author),
-        h('span', { class: 'time' }, timeAgo(thread.created)),
-        isPageComment(thread) ? h('span', { class: 'device page' }, 'General') : null,
-        thread.device ? h('span', { class: 'device' + (thread.device !== device() ? ' other' : ''), title: 'Written at ' + thread.viewport + (thread.browser ? ' · ' + thread.browser : '') }, thread.device) : null,
-        state.me.is_editor
-          ? h('select', { class: 'status', title: 'Status', onclick: (e) => e.stopPropagation(), onchange: (e) => setStatus(thread.id, e.target.value) },
-            Object.entries(STATUS_LABELS).map(([value, label]) => h('option', { value, selected: value === thread.status }, label)))
-          : h('span', { class: 'badge status-' + thread.status }, STATUS_LABELS[thread.status]),
-      ),
-      renderBody(thread),
-      ownActions(thread),
-      thread.screenshot ? h('a', { class: 'shot', href: thread.screenshot, target: '_blank', rel: 'noopener', title: 'What the reviewer saw' },
-        h('img', { src: thread.screenshot, alt: 'Screenshot when the comment was written', loading: 'lazy' })) : null,
-      thread.screenshotFailed ? h('p', { class: 'note' }, thread.screenshotFailed === 'blocked'
-        ? 'No screenshot: this browser blocked it. The comment itself is saved.'
-        : 'The screenshot could not be saved. The comment itself is saved.') : null,
-      where ? h('p', { class: 'detached' }, where + '. It was: “' + thread.snippet + '”') : null,
-      thread.replies.map((reply) => h('div', { class: 'reply' + (reply.author_type === 'ai' ? ' ai' : '') },
-        h('div', { class: 'meta' }, h('strong', {}, reply.author), h('span', { class: 'time' }, timeAgo(reply.created)), ownActions(reply)),
-        renderBody(reply),
-      )),
-      h('form', { class: 'reply-form', onsubmit: (e) => { e.preventDefault(); sendReply(thread.id, e.target); } },
-        !state.me.name && !store.get('name') ? guestNameFields(true) : null,
-        h('textarea', {
-          rows: 1, placeholder: 'Reply…', value: state.drafts[thread.id] || '',
-          oninput: (e) => { state.drafts[thread.id] = e.target.value; },
-          onkeydown: (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) e.target.form.requestSubmit(); },
-        }),
-        h('button', { type: 'submit' }, 'Send'),
-      ),
+  /** Reply box under a thread: the detail view's, or going through's. */
+  function renderReplyBox(thread, walking) {
+    const askName = !state.me.name && !store.get('name');
+    const editor = state.me.is_editor;
+    const button = (label, cls, then, key) => h('button', { type: 'button', class: cls, 'data-key': key, onclick: (e) => replyAction(thread.id, e.target.form, then) }, label);
+    return h('form', { class: 'reply-box', onsubmit: (e) => { e.preventDefault(); replyAction(thread.id, e.target, 'reply'); } },
+      h('label', { class: 'c-meta', for: 'wprc-reply' }, askName ? 'Reply' : 'Reply as ' + whoAmI()),
+      askName ? guestNameFields(true) : null,
+      h('textarea', {
+        id: 'wprc-reply', rows: 2, placeholder: 'Reply…', 'aria-label': 'Reply', value: state.drafts[thread.id] || '',
+        oninput: (e) => { state.drafts[thread.id] = e.target.value; },
+        onkeydown: (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) e.target.form.requestSubmit(); },
+      }),
+      h('div', { class: 'row' }, walking
+        ? [
+          h('button', { type: 'button', class: 'ghost', 'data-key': 'skip', title: 'Next (→)', onclick: () => stepWalk(1) }, 'Skip'),
+          h('button', { type: 'submit', class: editor ? 'ghost' : 'primary', 'data-key': 'reply' }, 'Reply'),
+          editor ? button('Resolve and next', 'ok', 'resolve-next', 'resolve-next') : null,
+        ]
+        : [
+          h('button', { type: 'button', class: 'ghost', 'data-key': 'copy', onclick: () => copyLink(thread) }, 'Copy link'),
+          editor && isTodo(thread) ? button('Reply and resolve', 'ok', 'resolve', 'resolve') : null,
+          h('button', { type: 'submit', class: 'primary', 'data-key': 'reply' }, 'Reply'),
+        ]),
     );
+  }
+
+  async function copyLink(thread) {
+    const link = thread.link || location.origin + displayPath(thread.url) + '#wprc-' + thread.id;
+    try {
+      await navigator.clipboard.writeText(link);
+      showToast('Link copied.');
+    } catch (e) {
+      window.prompt('Copy this link', link);
+    }
   }
 
   function focusThread(id, { scroll = true } = {}) {
     state.activeId = id;
+    if (!state.walk) state.detailId = id;
+    state.scope = 'page';
     const thread = state.threads.find((t) => t.id === id);
     togglePanel(true);
     renderPins();
@@ -471,8 +879,6 @@
     } else {
       highlight.hidden = true;
     }
-    const card = panel.querySelector('.thread.active');
-    if (card) card.scrollIntoView({ block: 'nearest' });
     if (history.replaceState) history.replaceState(null, '', '#wprc-' + id);
   }
 
@@ -512,7 +918,7 @@
     // Guests type their name once; after that it is remembered in this browser.
     const askName = !state.me.name && !store.get('name');
     const nameFields = guestNameFields(askName);
-    const asWho = !state.me.name && !askName ? h('p', { class: 'as' }, 'Commenting as ' + store.get('name') + ' · ',
+    const asWho = !state.me.name && !askName ? h('p', { class: 'as' }, 'Commenting as ' + store.get('name') + ', ',
       h('button', { type: 'button', class: 'link', onclick: (e) => { nameFields.hidden = false; nameFields.querySelector('input').required = true; e.target.parentNode.remove(); } }, 'change')) : null;
 
     composerEl.replaceChildren(h('form', { onsubmit: (e) => { e.preventDefault(); submitComposer(e.target); } },
@@ -529,14 +935,16 @@
     composerEl.hidden = false;
     const width = Math.min(340, window.innerWidth - 24);
     composerEl.style.width = width + 'px';
+    // Space the open panel takes on the right.
+    const panelWidth = state.panelOpen && window.innerWidth >= 600 ? panel.offsetWidth : 0;
     if (window.innerWidth < 600 || !el) {
-      // Phones, and general comments: dock above the toolbar (on phones the
-      // keyboard then does not hide it).
-      Object.assign(composerEl.style, { left: 'auto', right: '16px', top: 'auto', bottom: '64px' });
+      // Phones, and general comments: dock at the bottom, beside the panel
+      // (on phones the keyboard then does not hide it).
+      Object.assign(composerEl.style, { left: 'auto', right: panelWidth + 16 + 'px', top: 'auto', bottom: '64px' });
       if (window.innerWidth < 600) Object.assign(composerEl.style, { left: '12px', right: 'auto' });
     } else {
       Object.assign(composerEl.style, {
-        left: Math.max(12, Math.min(point.x, window.innerWidth - width - 12)) + 'px',
+        left: Math.max(12, Math.min(point.x, window.innerWidth - panelWidth - width - 12)) + 'px',
         right: 'auto',
         top: Math.max(12, Math.min(point.y + 12, window.innerHeight - 280)) + 'px',
         bottom: 'auto',
@@ -609,20 +1017,32 @@
     }
   }
 
-  function sendReply(id, form) {
+  /**
+   * Send what is in the reply box, then:
+   * - 'reply': nothing more (an empty box sends nothing);
+   * - 'resolve': resolve the thread, with or without a reply;
+   * - 'resolve-next': resolve it and go on to the next one.
+   */
+  function replyAction(id, form, then) {
     const textarea = form.querySelector('textarea');
     const text = textarea.value.trim();
-    if (!text) return;
+    if (!text && then === 'reply') { textarea.focus(); return; }
     return busy(form, async () => {
       try {
-        const thread = await api('/comments', {
-          method: 'POST',
-          body: JSON.stringify({ parent: id, text, ...guestFields(form) }),
-        });
-        delete state.drafts[id];
-        textarea.value = '';
-        textarea.blur();
-        upsert(thread);
+        if (text) {
+          const thread = await api('/comments', {
+            method: 'POST',
+            body: JSON.stringify({ parent: id, text, ...guestFields(form) }),
+          });
+          delete state.drafts[id];
+          textarea.value = '';
+          textarea.blur();
+          upsert(thread);
+        }
+        if (then !== 'reply') {
+          upsert(await api('/comments/' + id + '/status', { method: 'POST', body: JSON.stringify({ status: 'resolved' }) }));
+        }
+        if (then === 'resolve-next') stepWalk(1);
       } catch (error) {
         showToast(error.message);
       }
@@ -651,7 +1071,9 @@
         state.mutations++;
         const gone = result.removed || id;
         state.threads = state.threads.filter((t) => t.id !== gone);
+        syncSite(null, gone);
         if (state.activeId === gone) { state.activeId = null; highlight.hidden = true; }
+        if (state.detailId === gone) state.detailId = null;
         render();
       }
     } catch (error) {
@@ -672,11 +1094,13 @@
     const index = state.threads.findIndex((t) => t.id === thread.id);
     if (index === -1) state.threads.push(thread);
     else state.threads[index] = thread;
+    syncSite(thread);
     render();
   }
 
   function render() {
-    renderToolbar();
+    renderFab();
+    renderHint();
     renderPins();
     renderPanel();
   }
@@ -730,7 +1154,7 @@
     // html2canvas leaves the context scaled and shifted by the scroll offset.
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     if (rect) {
-      ctx.strokeStyle = '#4f46e5';
+      ctx.strokeStyle = '#3858e9';
       ctx.lineWidth = 3;
       ctx.strokeRect(rect.left * scale, rect.top * scale, rect.width * scale, rect.height * scale);
     }
@@ -841,18 +1265,23 @@
     }
   }
 
-  // --- walkthrough ---------------------------------------------------------
+  // --- going through -------------------------------------------------------
 
+  /**
+   * Step through every thread still to do on the site, one at a time and page
+   * by page: this page first, then the pages with the most to do. The list is
+   * kept in sessionStorage, so it carries over as pages change.
+   */
   async function startWalkthrough() {
     try {
-      const all = await api('/threads');
+      const all = await loadSite();
+      const order = new Map(sitePages(all).map((page, i) => [page.url, page.url === pageUrl() ? -1 : i]));
       const items = all
-        .filter((t) => state.showDone || !DONE.includes(t.status))
-        .sort((a, b) => a.url.localeCompare(b.url) || a.created.localeCompare(b.created))
-        .map((t) => ({ id: t.id, url: t.url, title: t.page_title }));
-      if (!items.length) { showToast('No open comments to walk through.'); return; }
-      const here = items.findIndex((t) => t.url === pageUrl());
-      state.walk = { items, index: Math.max(0, here) };
+        .filter(isTodo)
+        .sort((a, b) => order.get(a.url) - order.get(b.url) || a.created.localeCompare(b.created))
+        .map((t) => ({ id: t.id, url: t.url, title: shortTitle(t.page_title) }));
+      if (!items.length) { showToast('Nothing left to do on the site.'); return; }
+      state.walk = { items, index: 0 };
       session.set(WALK_KEY, state.walk);
       goToWalkItem();
     } catch (error) {
@@ -864,17 +1293,22 @@
     const item = state.walk.items[state.walk.index];
     session.set(WALK_KEY, state.walk);
     if (item.url !== pageUrl()) {
-      location.href = item.url + '#wprc-' + item.id;
+      location.href = displayPath(item.url) + '#wprc-' + item.id;
       return;
     }
-    renderWalkBar();
     if (state.threads.some((t) => t.id === item.id)) focusThread(item.id);
-    else showToast('That comment no longer exists.');
+    else { togglePanel(true); renderPanel(); }
   }
 
   function stepWalk(delta) {
+    if (!state.walk) return;
     const next = state.walk.index + delta;
-    if (next < 0 || next >= state.walk.items.length) return;
+    if (next < 0) return;
+    if (next >= state.walk.items.length) {
+      stopWalkthrough();
+      showToast('That was the last one.');
+      return;
+    }
     state.walk.index = next;
     goToWalkItem();
   }
@@ -882,20 +1316,42 @@
   function stopWalkthrough() {
     state.walk = null;
     session.set(WALK_KEY, null);
-    walkBar.hidden = true;
+    state.scope = 'site';
+    loadSite().catch(() => {});
+    renderPanel();
   }
 
-  function renderWalkBar() {
-    if (!state.walk) { walkBar.hidden = true; return; }
+  function renderWalk(list) {
     const { items, index } = state.walk;
-    walkBar.replaceChildren(
-      h('button', { title: 'Previous (←)', disabled: index === 0, onclick: () => stepWalk(-1) }, '‹'),
-      h('span', { class: 'pos' }, 'Comment ' + (index + 1) + ' of ' + items.length),
-      h('span', { class: 'page' }, items[index].title || items[index].url),
-      h('button', { title: 'Next (→)', disabled: index === items.length - 1, onclick: () => stepWalk(1) }, '›'),
-      h('button', { class: 'end', title: 'End walkthrough', onclick: stopWalkthrough }, 'Done'),
-    );
-    walkBar.hidden = false;
+    const item = items[index];
+    const samePage = items.filter((i) => i.url === item.url);
+    const nextPage = items.slice(index + 1).find((i) => i.url !== item.url);
+    const thread = item.url === pageUrl() ? list.find((t) => t.id === item.id) : null;
+    const last = index === items.length - 1;
+    return [
+      h('div', { class: 'walk' },
+        h('div', { class: 'walk-top' },
+          h('b', {}, 'Going through'),
+          h('span', { class: 'cnt' }, (index + 1) + ' of ' + items.length),
+          h('button', { type: 'button', class: 'iconbtn', title: 'Stop going through', 'aria-label': 'Stop going through', 'data-key': 'walk-stop', onclick: stopWalkthrough }, icon('close')),
+        ),
+        h('div', { class: 'walk-prog', role: 'progressbar', 'aria-valuemin': '1', 'aria-valuemax': String(items.length), 'aria-valuenow': String(index + 1), 'aria-label': 'Progress' },
+          h('i', { style: 'width:' + ((index + 1) / items.length) * 100 + '%' })),
+        h('div', { class: 'walk-nav' },
+          h('button', { type: 'button', class: 'ghost', title: 'Previous (←)', disabled: index === 0, 'data-key': 'walk-prev', onclick: () => stepWalk(-1) }, '← Previous'),
+          h('span', { class: 'pg' },
+            (item.title || displayPath(item.url)) + ', ' + (samePage.indexOf(item) + 1) + ' of ' + samePage.length + ' here',
+            h('br'),
+            nextPage ? 'next: ' + (nextPage.title || displayPath(nextPage.url)) : 'last page'),
+          h('button', { type: 'button', class: 'primary', title: 'Next (→)', 'data-key': 'walk-next', onclick: () => stepWalk(1) }, last ? 'Finish' : 'Next →'),
+        ),
+      ),
+      h('div', { class: 'p-body' }, thread
+        ? renderThreadBody(thread, true)
+        : h('div', { class: 'empty' }, h('b', {}, 'This comment is gone.'), h('span', {}, 'It was deleted or moved. Skip to the next one.'))),
+      thread ? renderReplyBox(thread, true) : h('div', { class: 'reply-box' }, h('div', { class: 'row' },
+        h('button', { type: 'button', class: 'primary', 'data-key': 'skip', onclick: () => stepWalk(1) }, 'Skip'))),
+    ];
   }
 
   // --- page events ---------------------------------------------------------
@@ -944,6 +1400,13 @@
       } else if (state.composer && !composerText().trim()) {
         handled(event);
         closeComposer();
+      } else if (state.menuOpen) {
+        handled(event);
+        state.menuOpen = false;
+        renderPanel();
+      } else if (state.panelOpen && state.detailId && !state.walk && !isTyping(event)) {
+        handled(event);
+        closeDetail();
       }
       return;
     }
@@ -1032,7 +1495,7 @@
 
     document.body.append(host);
     document.head.append(h('style', {}, 'html.wprc-commenting, html.wprc-commenting * { cursor: crosshair !important; }'));
-    renderToolbar();
+    renderFab();
     if (boot && Array.isArray(boot.threads)) {
       state.threads = boot.threads;
       render();
@@ -1040,20 +1503,29 @@
       await load();
     }
 
-    state.walk = session.get(WALK_KEY);
+    const walk = session.get(WALK_KEY);
+    state.walk = walk && Array.isArray(walk.items) && walk.items[walk.index] ? walk : null;
+    if (!state.walk) session.set(WALK_KEY, null);
+    const fromSummary = session.get(PANEL_KEY);
+    session.set(PANEL_KEY, null);
     const match = location.hash.match(/^#wprc-(\d+)$/);
     if (state.walk) {
-      renderWalkBar();
+      togglePanel(true);
       const item = state.walk.items[state.walk.index];
-      if (item && item.url === pageUrl()) setTimeout(() => focusThread(item.id), 300);
+      if (item.url === pageUrl()) setTimeout(() => focusThread(item.id), 300);
     } else if (match) {
       setTimeout(() => focusThread(Number(match[1])), 300);
-    } else if (token) {
+    } else if (token || fromSummary) {
       togglePanel(true);
     }
 
-    setInterval(() => { if (canRefresh()) load().catch(() => {}); }, POLL_MS);
-    document.addEventListener('visibilitychange', () => { if (canRefresh()) load().catch(() => {}); });
+    const refresh = () => {
+      if (!canRefresh()) return;
+      load().catch(() => {});
+      if (state.panelOpen) loadSite().catch(() => {});
+    };
+    setInterval(refresh, POLL_MS);
+    document.addEventListener('visibilitychange', refresh);
     // Late layout shifts (fonts, images, sliders) move elements after load.
     window.addEventListener('load', () => { elementCache.clear(); positionPins(); });
   }
@@ -1062,92 +1534,177 @@
 
   function CSS_TEXT() {
     return `
-      :host { all: initial; }
-      * { box-sizing: border-box; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+      :host {
+        all: initial;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+        --ink: #1e1e1e; --muted: #6b6b73; --line: #e3e3e8; --soft: #f5f5f7;
+        --accent: #3858e9; --accent-soft: #eef1fd;
+        --open: #3858e9; --open-bg: #eef1fd; --prog: #b26200; --prog-bg: #fff3e0; --done: #1f7a3d; --done-bg: #e6f5ea; --wontfix: #6b6b73; --wontfix-bg: #f0f0f2;
+      }
+      * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; }
       [hidden] { display: none !important; }
-      button { font: inherit; cursor: pointer; }
-      .toolbar { position: fixed; right: 16px; bottom: 16px; display: flex; gap: 8px; }
-      /* Keep the buttons reachable while the panel is open. */
-      .panel:not([hidden]) + .toolbar { right: 396px; }
-      .toolbar button { display: inline-flex; align-items: center; gap: 6px; padding: 10px 14px; border-radius: 999px; border: 1px solid #d4d4d8; background: #fff; color: #18181b; font-size: 14px; font-weight: 600; box-shadow: 0 4px 16px rgba(0,0,0,.15); }
-      .toolbar button.primary { background: #4f46e5; border-color: #4f46e5; color: #fff; }
-      .toolbar button.active { background: #18181b; border-color: #18181b; }
-      .count { min-width: 20px; padding: 1px 6px; border-radius: 999px; background: #4f46e5; color: #fff; font-size: 12px; }
-      .hint { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); background: #18181b; color: #fff; padding: 8px 14px; border-radius: 8px; font-size: 13px; max-width: calc(100vw - 24px); text-align: center; pointer-events: none; }
-      .hint .link { pointer-events: auto; }
-      .link.light { color: #c7d2fe; font-size: 13px; }
-      .device.page { background: #eef2ff; color: #3730a3; }
-      .highlight { position: fixed; pointer-events: none; outline: 2px solid #4f46e5; outline-offset: 2px; background: rgba(79,70,229,.08); border-radius: 2px; transition: all .08s; }
-      .pin { position: fixed; width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: 50% 50% 50% 0; border: 2px solid #fff; background: #4f46e5; color: #fff; font-size: 12px; font-weight: 700; box-shadow: 0 2px 8px rgba(0,0,0,.3); padding: 0; }
-      .pin.active { transform: scale(1.25); background: #18181b; }
+      button { font: inherit; color: inherit; cursor: pointer; }
+      button:disabled { opacity: .4; cursor: default; }
+      :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+      .icon { display: grid; place-items: center; }
+
+      /* On the page */
+      .highlight { position: fixed; pointer-events: none; outline: 2px solid var(--accent); outline-offset: 2px; background: rgba(56,88,233,.08); border-radius: 2px; transition: all .08s; }
+      .pin { position: fixed; width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: 50% 50% 50% 4px; border: 2px solid #fff; background: var(--open); color: #fff; font-size: 12px; font-weight: 700; box-shadow: 0 2px 8px rgba(0,0,0,.3); padding: 0; transition: transform .1s; }
+      .pin.active, .pin.hl { transform: scale(1.25); z-index: 1; }
+      .pin.active { box-shadow: 0 0 0 3px var(--ink), 0 2px 8px rgba(0,0,0,.3); }
       .pin.other-device { opacity: .55; border-style: dashed; }
-      .status-in_progress { background: #d97706 !important; }
-      .status-resolved { background: #16a34a !important; }
-      .status-wontfix { background: #71717a !important; }
-      .panel { position: fixed; top: 0; right: 0; bottom: 0; width: 380px; max-width: 100%; background: #fff; color: #18181b; box-shadow: -8px 0 32px rgba(0,0,0,.18); display: flex; flex-direction: column; font-size: 14px; }
-      .panel header { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid #e4e4e7; }
-      .panel header strong { flex: 1; font-size: 15px; }
-      .walk { padding: 4px 10px; border-radius: 999px; border: 1px solid #c7d2fe; background: #eef2ff; color: #3730a3; font-size: 12px; font-weight: 600; }
-      .filters { display: flex; gap: 14px; padding: 8px 16px; border-bottom: 1px solid #f4f4f5; font-size: 13px; color: #52525b; }
-      .filters label { display: flex; align-items: center; gap: 4px; }
-      .close { border: 0; background: none; font-size: 22px; line-height: 1; color: #52525b; }
-      .who { margin: 0; padding: 8px 16px; color: #71717a; font-size: 12px; border-bottom: 1px solid #f4f4f5; }
-      .threads { overflow-y: auto; flex: 1; padding: 8px 0 80px; }
-      .empty, .more { padding: 16px; color: #52525b; margin: 0; }
-      .more { font-size: 12px; }
-      .thread { padding: 12px 16px; border-bottom: 1px solid #f4f4f5; }
-      .thread.active { background: #eef2ff; }
-      .meta { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; }
-      .meta .time { color: #71717a; flex: 1; }
-      .num { display: inline-grid; place-items: center; min-width: 22px; height: 22px; border-radius: 50%; background: #4f46e5; color: #fff; font-size: 11px; font-weight: 700; }
-      .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; color: #fff; background: #4f46e5; }
-      .device { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: #f4f4f5; color: #52525b; }
-      .device.other { background: #fef3c7; color: #92400e; }
-      select.status { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid #d4d4d8; border-radius: 6px; background: #fff; color: #18181b; }
-      .text { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
+      .pin.status-in_progress, .num.status-in_progress, .bar .status-in_progress { background: var(--prog); }
+      .pin.status-resolved, .num.status-resolved, .bar .status-resolved { background: var(--done); }
+      .pin.status-wontfix, .num.status-wontfix { background: var(--wontfix); }
+      .bar .status-open { background: var(--open); }
+      .fab { position: fixed; right: 16px; bottom: 16px; display: inline-flex; align-items: center; gap: 8px; background: var(--ink); color: #fff; border: 0; border-radius: 999px; padding: 9px 14px; font-size: 14px; font-weight: 600; box-shadow: 0 4px 14px rgba(0,0,0,.25); }
+      .fab .n { background: var(--accent); border-radius: 999px; padding: 0 7px; font-size: 12px; line-height: 20px; }
+      .fab:focus-visible { outline-color: var(--accent); outline-offset: 3px; }
+      .hint { position: fixed; left: 12px; right: 12px; bottom: 12px; display: grid; gap: 8px; background: var(--accent); color: #fff; padding: 10px 12px; border-radius: 10px; font-size: 13px; box-shadow: 0 6px 24px rgba(0,0,0,.25); }
+      .hint .row, .pickbar .row { display: flex; gap: 8px; flex-wrap: wrap; }
+      .hint button, .pickbar button { border: 1px solid rgba(255,255,255,.6); background: transparent; color: #fff; border-radius: 6px; padding: 5px 10px; font-size: 13px; font-weight: 600; }
+      .hint button.solid, .pickbar button.solid { background: #fff; color: var(--accent); border-color: #fff; }
+      .hint :focus-visible, .pickbar :focus-visible { outline-color: #fff; }
+      .toast { position: fixed; left: 50%; bottom: 72px; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 14px; max-width: calc(100vw - 32px); }
+
+      /* Panel */
+      .panel { position: fixed; top: 0; right: 0; bottom: 0; width: 380px; max-width: 100%; background: #fff; color: var(--ink); border-left: 1px solid var(--line); box-shadow: -8px 0 32px rgba(0,0,0,.14); display: flex; flex-direction: column; font-size: 13.5px; line-height: 1.45; }
+      .panel.picking > :not(.pickbar) { opacity: .45; pointer-events: none; }
+      .pickbar { display: grid; gap: 4px; padding: 12px 16px; background: var(--accent); color: #fff; }
+      .pickbar b { font-size: 14px; }
+      .pickbar .row { margin-top: 6px; }
+      .p-head { padding: 14px 16px 12px; border-bottom: 1px solid var(--line); display: grid; gap: 10px; }
+      .p-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+      .p-top h2 { margin: 0; font-size: 15px; font-weight: 700; }
+      .p-top .where { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+      .iconbtn { border: 0; background: transparent; width: 30px; height: 30px; border-radius: 6px; display: grid; place-items: center; color: var(--muted); padding: 0; flex: none; }
+      .iconbtn:hover { background: var(--soft); color: var(--ink); }
+      .menu { position: relative; }
+      .menu-pop { position: absolute; right: 0; top: 34px; z-index: 5; background: #fff; border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.14); padding: 6px; display: grid; min-width: 250px; }
+      .menu-pop button, .menu-pop a { border: 0; background: transparent; text-align: left; padding: 8px 10px; border-radius: 5px; display: grid; color: var(--ink); text-decoration: none; font-size: 13.5px; }
+      .menu-pop button:hover, .menu-pop a:hover { background: var(--soft); }
+      .menu-pop small { color: var(--muted); font-size: 12px; }
+      .menu-who { margin: 0 0 4px; padding: 6px 10px 8px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+      .primary { border: 0; background: var(--accent); color: #fff; border-radius: 7px; padding: 7px 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+      .primary.big { padding: 9px 12px; }
+      .primary:focus-visible, .ok:focus-visible { outline-offset: 2px; }
+      .primary kbd { background: rgba(255,255,255,.22); border-radius: 3px; padding: 0 5px; font: 600 11.5px/18px inherit; font-family: inherit; }
+      .ghost { border: 1px solid #c9c9d0; background: #fff; border-radius: 7px; padding: 7px 12px; font-weight: 600; }
+      .ok { border: 0; background: var(--done); color: #fff; border-radius: 7px; padding: 7px 12px; font-weight: 600; }
+      .tabs { display: grid; grid-template-columns: 1fr 1fr; background: var(--soft); border-radius: 7px; padding: 3px; }
+      .tabs button { border: 0; background: transparent; border-radius: 5px; padding: 5px; font-weight: 600; color: var(--muted); }
+      .tabs button[aria-pressed="true"] { background: #fff; color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.1); }
+      .tabs .n { color: var(--muted); font-weight: 500; margin-left: 5px; }
+      .filters, .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+      .filters .sep { width: 1px; height: 18px; background: var(--line); margin: 0 2px; }
+      .chip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 3px 10px; font-size: 12.5px; font-weight: 600; color: #4a4a52; }
+      .chip[aria-pressed="true"] { border-color: var(--ink); background: var(--ink); color: #fff; }
+      .chip .n { font-weight: 500; opacity: .7; }
+      .chip .now { width: 6px; height: 6px; border-radius: 50%; background: #1f9d4c; }
+      .p-body { flex: 1; overflow: auto; min-height: 0; overscroll-behavior: contain; }
+      .grp { padding: 12px 16px 6px; font-size: 11.5px; font-weight: 700; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
+      .empty { padding: 28px 18px; margin: 0; color: var(--muted); display: grid; gap: 6px; text-align: center; }
+      .empty b { color: var(--ink); }
+      .link { border: 0; background: none; padding: 0; color: var(--accent); font-size: inherit; font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+      .link.danger { color: #b91c1c; }
+
+      /* Thread cards */
+      .card { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; width: 100%; padding: 12px 16px; border: 0; border-bottom: 1px solid var(--line); background: transparent; text-align: left; font-size: 13.5px; line-height: 1.45; }
+      .card:hover, .card.hl { background: var(--accent-soft); }
+      .card.active { box-shadow: inset 3px 0 0 var(--accent); }
+      .card:focus-visible { outline-offset: -2px; }
+      .card > .c-main { display: grid; min-width: 0; }
+      .num { width: 24px; height: 24px; border-radius: 50% 50% 50% 4px; background: var(--open); color: #fff; font-weight: 700; font-size: 12px; display: inline-grid; place-items: center; flex: none; }
+      .c-meta { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); min-width: 0; flex-wrap: wrap; }
+      .c-meta b { color: var(--ink); font-size: 13px; }
+      .c-where { font-size: 12px; color: var(--accent); font-weight: 600; margin: 2px 0 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .c-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+      .c-text.deleted { color: #a1a1aa; font-style: italic; }
+      .c-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; font-size: 12px; color: var(--muted); }
+      .c-foot .other { color: #92400e; }
+      .c-foot .warn { color: #b45309; }
+      .st { border-radius: 999px; padding: 0 7px; font-size: 11.5px; font-weight: 700; line-height: 18px; white-space: nowrap; }
+      .st-open { background: var(--open-bg); color: var(--open); }
+      .st-in_progress { background: var(--prog-bg); color: var(--prog); }
+      .st-resolved { background: var(--done-bg); color: var(--done); }
+      .st-wontfix { background: var(--wontfix-bg); color: var(--wontfix); }
+
+      /* Whole site */
+      .sum { padding: 14px 16px; border-bottom: 1px solid var(--line); display: grid; gap: 10px; }
+      .sum-n { display: flex; gap: 18px; }
+      .sum-n span { display: grid; font-size: 12px; color: var(--muted); }
+      .sum-n b { font-size: 22px; color: var(--ink); line-height: 1.1; }
+      .bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; gap: 2px; background: var(--line); }
+      .go { width: 100%; padding: 9px 12px; }
+      .note { margin: 0; font-size: 12px; color: var(--muted); }
+      .prow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--line); padding: 11px 16px; font-size: 13.5px; }
+      .prow:hover { background: var(--accent-soft); }
+      .prow:focus-visible { outline-offset: -2px; }
+      .prow.here { box-shadow: inset 3px 0 0 var(--accent); }
+      .pr-main { display: grid; min-width: 0; }
+      .pr-main b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .pr-path { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .you { font-size: 11px; font-weight: 700; color: var(--accent); }
+      .pr-counts { display: flex; gap: 4px; align-items: center; }
+      .pr-done { font-size: 12px; color: var(--done); font-weight: 600; margin-left: 2px; white-space: nowrap; }
+
+      /* One thread */
+      .d-head { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+      .d-head .back { border: 0; background: transparent; color: var(--accent); font-weight: 600; padding: 0; margin-right: auto; }
+      select.status { font: inherit; font-size: 12.5px; font-weight: 600; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); }
+      .d-body { padding: 14px 16px; display: grid; gap: 14px; }
+      .d-body > .c-meta select.status { margin-left: auto; }
+      .shot { display: block; }
+      .shot img { display: block; width: 100%; max-height: 180px; object-fit: cover; object-position: top; border-radius: 6px; border: 1px solid var(--line); }
+      .ctx { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 10px; }
+      .detached { margin: 0; font-size: 12px; color: #b45309; }
+      .msg { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 10px; }
+      .msg.solo { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+      .av { width: 28px; height: 28px; border-radius: 50%; background: #dfe4fb; color: var(--accent); font-weight: 700; font-size: 11.5px; display: grid; place-items: center; }
+      .av.c { background: #ede4fe; color: #6d28d9; }
+      .text { margin: 2px 0 0; white-space: pre-wrap; word-break: break-word; }
       .text.deleted { color: #a1a1aa; font-style: italic; }
       .edited { color: #a1a1aa; font-size: 12px; }
-      .own { display: inline-flex; gap: 10px; margin-top: 4px; }
-      .meta .own { margin: 0 0 0 auto; }
-      .shot { display: block; margin-top: 8px; }
-      .shot img { display: block; width: 100%; max-height: 160px; object-fit: cover; object-position: top; border-radius: 6px; border: 1px solid #e4e4e7; }
-      .note { margin: 6px 0 0; font-size: 12px; color: #71717a; }
-      .detached { margin: 6px 0 0; font-size: 12px; color: #b45309; }
-      .reply { margin: 10px 0 0 14px; padding-left: 10px; border-left: 2px solid #e4e4e7; }
-      .reply.ai { border-left-color: #a78bfa; }
-      .reply .meta { cursor: default; }
-      .reply-form { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-      .reply-form .row { flex-basis: 100%; }
-      .reply-form textarea { flex: 1; }
+      .own { display: inline-flex; gap: 10px; margin-left: auto; }
+      .own .link { font-size: 12px; font-weight: 500; }
       .edit-form { display: grid; gap: 6px; margin-top: 6px; }
-      textarea, input[type=text], input:not([type]), input[type=email] { font: inherit; font-size: 16px; width: 100%; padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 8px; color: #18181b; background: #fff; resize: vertical; }
-      textarea:focus, input:focus { outline: 2px solid #4f46e5; outline-offset: -1px; border-color: transparent; }
-      .reply-form button, .actions button { padding: 6px 12px; border-radius: 8px; border: 1px solid #d4d4d8; background: #fff; color: #18181b; font-size: 13px; font-weight: 600; }
-      .actions button.primary { background: #4f46e5; border-color: #4f46e5; color: #fff; }
-      .link { border: 0; background: none; padding: 0; color: #4f46e5; font-size: 12px; text-decoration: underline; }
-      .link.danger { color: #b91c1c; }
-      .composer { position: fixed; background: #fff; color: #18181b; padding: 12px; border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); font-size: 14px; }
+      .reply-box { border-top: 1px solid var(--line); padding: 12px 16px; display: grid; gap: 8px; }
+      .reply-box .row:last-child, .actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+      .actions button { border: 1px solid #c9c9d0; background: #fff; border-radius: 7px; padding: 6px 12px; font-size: 13px; font-weight: 600; }
+      .actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+      /* Going through */
+      .walk { display: grid; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--soft); }
+      .walk-top { display: flex; align-items: center; gap: 8px; }
+      .walk-top b { font-size: 14px; }
+      .walk-top .cnt { margin-left: auto; color: var(--muted); font-weight: 600; font-variant-numeric: tabular-nums; }
+      .walk-prog { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+      .walk-prog i { display: block; height: 100%; background: var(--accent); }
+      .walk-nav { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+      .walk-nav .pg { font-size: 12px; color: var(--muted); text-align: center; overflow: hidden; text-overflow: ellipsis; }
+
+      /* Forms */
+      textarea, input[type=text], input:not([type]), input[type=email] { font: inherit; font-size: 16px; width: 100%; padding: 8px 10px; border: 1px solid #c9c9d0; border-radius: 7px; color: var(--ink); background: #fff; resize: vertical; }
+      .reply-box textarea { font-size: 14px; min-height: 56px; }
+      textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+      .composer { position: fixed; background: #fff; color: var(--ink); padding: 12px; border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); font-size: 14px; }
       .composer form { display: grid; gap: 8px; }
-      .target { margin: 0; font-size: 12px; color: #71717a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .as { margin: 0; font-size: 12px; color: #71717a; }
+      .target { margin: 0; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .as { margin: 0; font-size: 12px; color: var(--muted); }
       .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
       .row.single { grid-template-columns: 1fr; }
-      .actions { display: flex; justify-content: flex-end; gap: 6px; }
-      .walkbar:not([hidden]) + .hint { top: 58px; }
-      .walkbar { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 6px; background: #18181b; color: #fff; border-radius: 999px; font-size: 13px; box-shadow: 0 6px 24px rgba(0,0,0,.25); max-width: calc(100vw - 24px); }
-      .walkbar button { border: 0; background: #3f3f46; color: #fff; border-radius: 999px; min-width: 30px; height: 30px; font-size: 18px; line-height: 1; }
-      .walkbar button:disabled { opacity: .35; cursor: default; }
-      .walkbar .end { font-size: 13px; padding: 0 12px; background: #4f46e5; }
-      .walkbar .pos { font-weight: 600; white-space: nowrap; }
-      .walkbar .page { color: #a1a1aa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
-      .toast { position: fixed; left: 50%; bottom: 72px; transform: translateX(-50%); background: #18181b; color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 14px; max-width: calc(100vw - 32px); }
+
       @media (max-width: 600px) {
-        .panel { top: auto; left: 0; right: 0; width: auto; height: 70vh; border-radius: 14px 14px 0 0; }
-        .toolbar { right: 12px; bottom: 12px; }
-        .panel:not([hidden]) + .toolbar { right: 12px; bottom: calc(70vh + 12px); }
+        .panel { top: auto; left: 0; right: 0; width: auto; height: 70vh; border-left: 0; border-radius: 14px 14px 0 0; }
         .row { grid-template-columns: 1fr; }
-        .walkbar .page { display: none; }
-        .hint { top: auto; bottom: 64px; }
+        .reply-box textarea { font-size: 16px; min-height: 44px; }
+        .reply-box { padding: 10px 16px; gap: 6px; }
+        .reply-box > label { display: none; }
+        .walk { gap: 8px; padding: 10px 16px; }
+        .shot img { max-height: 110px; }
+        .d-body { gap: 10px; }
       }
     `;
   }

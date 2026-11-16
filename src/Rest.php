@@ -183,12 +183,14 @@ class Rest implements Module
             'round' => $round ? get_the_title($round) : null,
             // Only ask guests for an email address when it is used for something.
             'asks_email' => Notifications::settings()['email_participants'],
+            // Where people who may invite guests make a review link; null for everyone else.
+            'links' => current_user_can(Admin::ROUND_CAP) ? admin_url('admin.php?page='.Admin::MENU_SLUG) : null,
         ];
     }
 
     /**
-     * Every thread on the site, without replies: what the walkthrough steps
-     * through.
+     * Every thread on the site, without replies: what the panel's site
+     * summary counts and going through steps through.
      */
     public static function listAllThreads(): array
     {
@@ -201,6 +203,8 @@ class Rest implements Module
             'status' => (string) get_post_meta($post->ID, '_wprc_status', true) ?: 'open',
             'device' => Store::device((string) get_post_meta($post->ID, '_wprc_viewport', true)),
             'created' => get_post_time('c', true, $post),
+            // Last reply or status change, for "last activity" in the summary.
+            'activity' => gmdate('c', (int) get_post_meta($post->ID, '_wprc_activity', true) ?: (int) get_post_time('U', true, $post)),
             'author' => Store::formatComment($post)['author'],
             'text' => wp_trim_words($post->post_content, 16, '…'),
         ], $threads));

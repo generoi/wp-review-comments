@@ -2,16 +2,18 @@
 
 Click-to-comment website review for WordPress. Clients and the team pin comments on the live (staging) site, reply in threads, and Claude reads and answers them through MCP.
 
-- **Comment on anything.** Click "+ Comment" (or press <kbd>C</kbd>), click an element, write. Pins stay on the element and follow it on scroll and resize.
-- **General comments.** "+ General comment" (top of the threads panel, or in the comment-mode hint) is for feedback about the whole page rather than one element.
+- **Comment on anything.** Open the panel with the "Review" button, press "+ Comment" (or <kbd>C</kbd> anywhere), click an element, write. While picking, a bar at the top of the panel says what to do, with Cancel and "Comment on the whole page"; <kbd>Esc</kbd> cancels. On phones the panel steps aside and a small hint at the bottom does the same. Pins stay on the element and follow it on scroll and resize.
+- **General comments.** For feedback about the whole page rather than one element: "Comment on the whole page" while picking, or "General comment" in the panel's ⋯ menu.
+- **A panel to scan and finish threads.** "This page" lists each thread with its pin number (in its status colour), author, time, where on the page it is (nearest heading, text or block), two lines of text, status, screen size and replies. Hovering a thread lifts its pin and outlines its element; hovering a pin lights up its thread. Click one for the full thread: screenshot, context, replies, a reply box, "Copy link", and for editors a status menu and "Reply and resolve". Status filters ("To do", the default, for open and in progress; "Resolved"; "All") and screen size filters (a dot marks your current size) sit above the list. Closed, the panel leaves one "Review, N open" button.
+- **The whole site at a glance.** "Whole site" shows open, in-progress and resolved totals with a bar, and every page with threads, most to do first, with its last activity. Click a page to go there with the panel open.
 - **Menus and dropdowns too.** Open the menu first, press <kbd>C</kbd>, hover the item and press <kbd>Enter</kbd>. Clicking the overlay never counts as a click outside the menu.
 - **A screenshot with every comment**, taken when the element is picked, with the element outlined. Menus and slides are shown as the reviewer saw them.
 - **Several people at once.** Every comment has a named author; threads take replies; the page refreshes every 20 seconds and when you come back to the tab.
 - **Guests without accounts.** Share a review link; people enter their name once per browser. An email address is asked for only when email notifications are on. Authors can edit and delete their own comments (deleted comments go to the trash).
-- **Screen sizes.** Each thread is labelled mobile, tablet or desktop, and the panel can show only the current size.
-- **Walkthrough.** Step through every open comment on the site, page by page (<kbd>←</kbd> <kbd>→</kbd>). Made for going through feedback with a client on a shared screen.
+- **Screen sizes.** Each thread is labelled mobile, tablet or desktop, and the panel can filter by size.
+- **Going through.** "Go through N to do, page by page" in the site summary steps through every thread still to do, this page first, then the pages with the most to do. The panel shows where you are ("3 of 15", a progress bar, this page and the next one), the thread with its screenshot and replies, a reply box, "Skip" and, for editors, "Resolve and next". <kbd>←</kbd> <kbd>→</kbd> step back and forth, and it carries on across page loads until you stop it. Made for going through feedback with a client on a shared screen.
 - **Notifications** to a Google Chat space (one Chat thread per review thread), and optionally email to everyone in a thread on new replies.
-- **Built for Claude.** Each thread stores the page path, post ID, block chain (`wp-block-button / wp-block-gds-hero`, innermost first), nearest heading, CSS selector, text snippet, screen size, browser ("Safari 18.4 · iOS 18.4 · touch · 3x") and screenshot, so Claude can go from a comment straight to the block or template that needs changing.
+- **Built for Claude.** Each thread stores the page path, post ID, block chain (`wp-block-button / wp-block-gds-hero`, innermost first), nearest heading, CSS selector, text snippet, screen size, browser ("Safari 18.4, iOS 18.4, touch, 3x") and screenshot, so Claude can go from a comment straight to the block or template that needs changing.
 
 Nothing in the plugin is tied to a theme or host. Block markup gives the richest context, but classic themes work too.
 
@@ -60,7 +62,7 @@ Then `composer require private/mcp-adapter:0.7.0` and `wp plugin activate mcp-ad
 
 Opening a review link swaps the token for a signed, HttpOnly session cookie bound to the round, then removes the token from the address bar. Only a hash of the token is stored. Revoking or expiring the round ends every session made from it. A separate per-browser key (also HttpOnly) is what lets a guest edit their own comments.
 
-Pages stay cacheable. A small inline loader does nothing unless there is a review link, a guest session, a `#wprc-<id>` comment link, a walkthrough in progress, or a logged-in editor. It then asks the uncached `/wprc/v1/boot` endpoint for the overlay URL, the viewer and the page's threads in one request, so a page cached before a plugin update still gets the new overlay. All plugin REST responses are sent `no-store`.
+Pages stay cacheable. A small inline loader does nothing unless there is a review link, a guest session, a `#wprc-<id>` comment link, going through in progress, or a logged-in editor. It then asks the uncached `/wprc/v1/boot` endpoint for the overlay URL, the viewer and the page's threads in one request, so a page cached before a plugin update still gets the new overlay. All plugin REST responses are sent `no-store`.
 
 ## Where the data lives
 
@@ -117,9 +119,9 @@ Every thread has a `link` that opens the page scrolled to the comment, and a `sc
 ### Suggested workflow
 
 1. **Collect.** Send the client a review link; the team comments while logged in.
-2. **Walk through together.** Ask Claude to summarise the threads grouped by page and block and flag what is unclear or overlapping. Click **Walkthrough** on a shared screen, agree on each fix, and have Claude set the status to `in_progress` or `wontfix` with a note.
+2. **Walk through together.** Ask Claude to summarise the threads grouped by page and block and flag what is unclear or overlapping. Open **Whole site** and click **Go through** on a shared screen, agree on each fix, and have Claude set the status to `in_progress` or `wontfix` with a note.
 3. **Fix.** Claude works through the `in_progress` threads, replies with what changed, and sets them to `resolved`.
-4. **Verify.** The client checks resolved pins (tick "Show resolved") and reopens if needed.
+4. **Verify.** The client checks resolved pins (the "Resolved" filter) and reopens if needed.
 
 ## Development
 
